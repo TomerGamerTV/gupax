@@ -64,6 +64,7 @@ impl crate::app::App {
                         &self.gupax_p2pool_api,
                         &self.benchmarks,
                         &mut self.state.p2pool.observers,
+                        &self.file_window,
                         ui,
                     );
                 }

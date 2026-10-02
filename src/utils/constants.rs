@@ -281,7 +281,12 @@ pub const STATUS_SUBMENU_OBSERVER: &str = "The P2Pool observer for the chain you
 pub const STATUS_SUBMENU_OBSERVER_CHAIN: &str = "Chain of the observer";
 pub const STATUS_SUBMENU_ADD_OBSERVER: &str = "Add an observer for another chain";
 pub const STATUS_SUBMENU_REMOVE_OBSERVER: &str = "Remove this observer";
-pub const STATUS_SUBMENU_REFRESH: &str = "Add the missing payouts listed by the observer of the chain P2Pool mines on, and remove the payouts of orphaned blocks.";
+pub const STATUS_SUBMENU_VIEW_KEY: &str =
+    "Private view key of your P2Pool address, used to find the missing payouts.";
+pub const STATUS_SUBMENU_SHOW_VIEW_KEY: &str = "Show the private view key";
+pub const STATUS_SUBMENU_PASTE_VIEW_KEY: &str = "Paste the private view key";
+pub const STATUS_SUBMENU_FILE_VIEW_KEY: &str = "Read the private view key from a file";
+pub const STATUS_SUBMENU_REFRESH: &str = "Add the missing payouts, found with the private view key if filled or else listed by the observer of the chain P2Pool mines on, and remove the payouts of orphaned blocks.";
 pub const STATUS_SUBMENU_REFRESH_SYNCING: &str = "A sync is already running.";
 pub const STATUS_SUBMENU_REFRESH_NO_P2POOL: &str = "P2Pool must be running and synced.";
 pub const STATUS_SUBMENU_AUTOMATIC: &str =

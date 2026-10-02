@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use log::*;
+use monero::{Transaction, consensus::deserialize};
 use reqwest::header::CONTENT_TYPE;
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, de::DeserializeOwned};
@@ -76,10 +77,19 @@ struct BlockHeaderResult {
     status: String,
 }
 
-// Block header of the Monero node, with the fields the sync uses.
+// Result of [get_block], with the fields the sync uses.
 #[derive(Deserialize)]
+struct BlockResult {
+    blob: String,
+    status: String,
+}
+
+// Block header of the Monero node, with the fields the sync uses.
+#[derive(Clone, Deserialize)]
 pub(super) struct BlockHeader {
+    pub(super) height: u64,
     pub(super) hash: String,
+    miner_tx_hash: String,
 }
 
 // Header of the main chain block at [height].
@@ -91,6 +101,71 @@ pub(super) async fn block_header(
     let result = rpc::<BlockHeaderResult>(node, "get_block_header_by_height", params).await?;
     ensure_ok(&result.status)?;
     Ok(result.block_header)
+}
+
+// Responses of the Monero node, with the fields the sync uses.
+#[derive(Deserialize)]
+struct BlockHeaders {
+    headers: Vec<BlockHeader>,
+    status: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct Transactions {
+    #[serde(default)]
+    pub(super) txs: Vec<Tx>,
+    status: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct Tx {
+    pruned_as_hex: String,
+    pub(super) block_height: u64,
+    pub(super) block_timestamp: i64,
+}
+
+pub(super) async fn block_headers(
+    node: &NodeClient<'_>,
+    start: u64,
+    end: u64,
+) -> anyhow::Result<Vec<BlockHeader>> {
+    let params = json!({"start_height": start, "end_height": end});
+    let headers = rpc::<BlockHeaders>(node, "get_block_headers_range", params).await?;
+    ensure_ok(&headers.status)?;
+    Ok(headers.headers)
+}
+
+pub(super) async fn coinbases(
+    node: &NodeClient<'_>,
+    headers: &[BlockHeader],
+) -> anyhow::Result<Vec<Tx>> {
+    let hashes: Vec<&str> = headers.iter().map(|h| h.miner_tx_hash.as_str()).collect();
+    let body = json!({"txs_hashes": hashes, "prune": true});
+    let response = post(node, "/get_transactions", &body.to_string())
+        .await?
+        .error_for_status()?;
+    let txs = json::<Transactions>(response).await?;
+    ensure_ok(&txs.status)?;
+    anyhow::ensure!(
+        txs.txs.len() == hashes.len(),
+        "missing coinbase transactions"
+    );
+    Ok(txs.txs)
+}
+
+// Coinbase transaction of the block [hash], in the main chain or orphaned.
+pub(super) async fn block_coinbase(
+    node: &NodeClient<'_>,
+    hash: &str,
+) -> anyhow::Result<Transaction> {
+    let result = rpc::<BlockResult>(node, "get_block", json!({"hash": hash})).await?;
+    ensure_ok(&result.status)?;
+    let block: monero::Block = deserialize(&hex::decode(&result.blob)?)?;
+    Ok(block.miner_tx)
+}
+
+pub(super) fn transaction(tx: &Tx) -> anyhow::Result<Transaction> {
+    Ok(deserialize(&hex::decode(&tx.pruned_as_hex)?)?)
 }
 
 // This matches a JSON-RPC response of the Monero node.
@@ -151,7 +226,7 @@ async fn rpc<T: DeserializeOwned>(
         .error_for_status()?;
     let response = json::<RpcResponse<T>>(response).await?;
     if let Some(error) = response.error {
-        anyhow::bail!("node error: {}", error.message);
+        return Err(NodeError(error.message).into());
     }
     response
         .result
@@ -183,6 +258,18 @@ impl std::fmt::Display for NoAnswer {
         f.write_str("no answer from the node")
     }
 }
+
+// Error the node answered to a request.
+#[derive(Debug)]
+pub(super) struct NodeError(String);
+
+impl std::fmt::Display for NodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "node error: {}", self.0)
+    }
+}
+
+impl std::error::Error for NodeError {}
 
 fn ensure_ok(status: &str) -> anyhow::Result<()> {
     anyhow::ensure!(status == "OK", "node status: {status}");

@@ -17,6 +17,7 @@
 
 use crate::{
     app::{Benchmark, eframe_impl::ProcessStatesGui, submenu_enum::SubmenuStatus},
+    components::gupax::FileWindow,
     disk::{
         gupax_p2pool_api::GupaxP2poolApi,
         state::{Observer, Status},
@@ -58,6 +59,7 @@ impl Status {
         gupax_p2pool_api: &Arc<Mutex<GupaxP2poolApi>>,
         benchmarks: &[Benchmark],
         observers: &mut Vec<Observer>,
+        file_window: &Arc<Mutex<FileWindow>>,
         ui: &mut egui::Ui,
     ) {
         //---------------------------------------------------------------------------------------------------- [Processes]
@@ -84,6 +86,7 @@ impl Status {
                 states.find(ProcessName::P2pool).state == ProcessState::Alive,
                 p2pool_api,
                 observers,
+                file_window,
             );
         //---------------------------------------------------------------------------------------------------- [Benchmarks]
         } else if self.submenu == SubmenuStatus::Benchmarks {

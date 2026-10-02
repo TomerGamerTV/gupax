@@ -32,6 +32,7 @@ use crate::helper::ProcessState;
 use crate::helper::check_died;
 use crate::helper::check_user_input;
 use crate::helper::crawler::Crawler;
+use crate::helper::payout_sync;
 use crate::helper::signal_end;
 use crate::helper::sleep_end_loop;
 use crate::regex::P2POOL_REGEX;
@@ -410,7 +411,7 @@ impl Helper {
             // This parses the input and attempts to fill out
             // the [ImgP2pool]... This is pretty bad code...
             let mut last = "";
-            let mut wallet = "";
+            let (mut wallet, mut subaddress) = ("", "");
             let lock = helper.lock().unwrap();
             let mut p2pool_image = lock.img_p2pool.lock().unwrap();
             let mut chain = P2poolChain::Main;
@@ -430,6 +431,7 @@ impl Helper {
                         p2pool_image.address = Self::head_tail_of_monero_address(arg);
                         wallet = arg;
                     }
+                    "--subaddress" => subaddress = arg,
                     "--out-peers" => p2pool_image.out_peers = arg.to_string(),
                     "--in-peers" => p2pool_image.in_peers = arg.to_string(),
                     "--data-api" => api_path = path.parent().unwrap_or(path).join(arg),
@@ -447,7 +449,7 @@ impl Helper {
                 let arg = if arg == "localhost" { "127.0.0.1" } else { arg };
                 last = arg;
             }
-            (chain, wallet.to_string())
+            (chain, payout_sync::payout_address(wallet, subaddress))
         } else {
             *helper.lock().unwrap().img_p2pool.lock().unwrap() = ImgP2pool {
                 chain: state.chain.to_string(),

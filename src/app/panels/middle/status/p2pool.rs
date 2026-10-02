@@ -17,14 +17,18 @@
 
 use std::sync::{Arc, Mutex};
 
-use egui::{Button, Label, RichText, ScrollArea, Separator, Slider, TextEdit, TextStyle};
+use egui::{
+    Button, Label, RichText, ScrollArea, Separator, Slider, TextEdit, TextStyle, ViewportCommand,
+    text::{CCursor, CCursorRange},
+};
 use readable::num::Unsigned;
 use strum::{EnumCount, IntoEnumIterator};
 
 use crate::{
+    components::gupax::{FileType, FileWindow},
     disk::{
         gupax_p2pool_api::GupaxP2poolApi,
-        state::{Observer, P2poolChain, Status},
+        state::{Gupax, Observer, P2poolChain, Status},
         status::{Hash, PayoutView},
     },
     helper::{p2pool::PubP2poolApi, payout_sync},
@@ -39,6 +43,7 @@ impl Status {
         p2pool_alive: bool,
         p2pool_api: &Arc<Mutex<PubP2poolApi>>,
         observers: &mut Vec<Observer>,
+        file_window: &Arc<Mutex<FileWindow>>,
     ) {
         let mut api = gupax_p2pool_api.lock().unwrap();
         // let height = size.y;
@@ -182,6 +187,62 @@ impl Status {
                 if api.observers != *observers {
                     api.observers.clone_from(observers);
                 }
+                ui.horizontal(|ui| {
+                    ui.add_sized([0.0, height], Label::new("Private view key"));
+                    // The key stays shown until Gupax restarts.
+                    let shown_id = ui.id().with("view_key_shown");
+                    let shown = ui.data(|data| data.get_temp(shown_id)).unwrap_or(false);
+                    let key = ui
+                        .add(
+                            TextEdit::singleline(&mut api.view_key)
+                                .password(!shown)
+                                .desired_width(ui.available_width() / 3.0),
+                        )
+                        .on_hover_text(STATUS_SUBMENU_VIEW_KEY);
+                    if ui
+                        .add(Button::new("👁 Show").selected(shown))
+                        .on_hover_text(STATUS_SUBMENU_SHOW_VIEW_KEY)
+                        .clicked()
+                    {
+                        ui.data_mut(|data| data.insert_temp(shown_id, !shown));
+                    }
+                    if ui
+                        .button("🗊 Paste")
+                        .on_hover_text(STATUS_SUBMENU_PASTE_VIEW_KEY)
+                        .clicked()
+                    {
+                        // The clipboard content arrives as a paste event in the next frame
+                        // and replaces the selected key.
+                        let mut state = TextEdit::load_state(ui.ctx(), key.id).unwrap_or_default();
+                        let end = CCursor::new(api.view_key.chars().count());
+                        state
+                            .cursor
+                            .set_char_range(Some(CCursorRange::two(CCursor::new(0), end)));
+                        state.store(ui.ctx(), key.id);
+                        key.request_focus();
+                        ui.ctx().send_viewport_cmd(ViewportCommand::RequestPaste);
+                    }
+                    let window_busy = file_window.lock().unwrap().thread;
+                    if ui
+                        .add_enabled(!window_busy, Button::new("🗁 File"))
+                        .on_hover_text(STATUS_SUBMENU_FILE_VIEW_KEY)
+                        .clicked()
+                    {
+                        Gupax::spawn_file_window_thread(file_window, FileType::ViewKey);
+                    }
+                    let mut file_window = file_window.lock().unwrap();
+                    // An error stays until the next file is picked.
+                    match &file_window.view_key {
+                        Some(Ok(key)) => {
+                            api.view_key.clone_from(key);
+                            file_window.view_key = None;
+                        }
+                        Some(Err(e)) => {
+                            ui.label(e.as_str());
+                        }
+                        None => (),
+                    }
+                });
                 ui.horizontal(|ui| {
                     let enabled = !api.syncing && p2pool_alive;
                     let disabled_reason = if api.syncing {

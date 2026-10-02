@@ -42,6 +42,7 @@ pub struct GupaxP2poolApi {
     pub chain: P2poolChain,    // Chain of the running P2Pool
     pub nodes: P2poolNodes,    // Monero nodes of the running P2Pool
     pub observers: Vec<Observer>, // Observers used to sync the payouts
+    pub view_key: String,      // Private view key used to sync the payouts, kept in memory only
     announced: HashMap<u64, u64>, // Amount of the payout P2Pool announced at each height
     pending: Vec<String>,      // Payout lines of [log] missing from its file
     replaced: Vec<(u64, u64)>, // (height, amount) of the replaced payouts left in the file of [log]
@@ -76,6 +77,7 @@ impl GupaxP2poolApi {
             chain: P2poolChain::default(),
             nodes: P2poolNodes::default(),
             observers: Vec::new(),
+            view_key: String::new(),
             announced: HashMap::new(),
             pending: Vec::new(),
             replaced: Vec::new(),
@@ -241,28 +243,36 @@ impl GupaxP2poolApi {
         self.add(Self::format_payout(&date, &atomic_unit, &block))
     }
 
-    // Removes the payouts received in the blocks at [heights], except the (height, amount)
-    // payouts [kept], and updates [api] and the files. Returns the number of payouts removed.
+    // Removes the payouts received in the blocks at [heights] and the (height, amount) payouts
+    // [orphaned], except the (height, amount) payouts [kept], then updates [api] and the files.
+    // Returns the number of payouts removed.
     pub fn remove_payouts(
         api: &Mutex<Self>,
         heights: &[u64],
         kept: &[(u64, u64)],
+        orphaned: &[(u64, u64)],
     ) -> Result<u64, TomlError> {
-        if heights.is_empty() {
+        if heights.is_empty() && orphaned.is_empty() {
             return Ok(0);
         }
         Self::edit_unlocked(api, |lines| {
             let count = lines.len();
             lines.retain(|line| {
-                let Some(height) =
-                    PayoutOrd::payout_height(line).filter(|height| heights.contains(height))
-                else {
+                let Some(height) = PayoutOrd::payout_height(line).filter(|height| {
+                    heights.contains(height)
+                        || orphaned
+                            .iter()
+                            .any(|&(orphaned_height, _)| orphaned_height == *height)
+                }) else {
                     return true;
                 };
                 let amount = PayoutOrd::parse_formatted_payout_line(line).1.to_u64();
-                kept.iter().any(|&(kept_height, kept_amount)| {
-                    kept_height == height && Self::same_amount(kept_amount, amount)
-                })
+                let listed = |payouts: &[(u64, u64)]| {
+                    payouts.iter().any(|&(paid_height, paid_amount)| {
+                        paid_height == height && Self::same_amount(paid_amount, amount)
+                    })
+                };
+                listed(kept) || (!heights.contains(&height) && !listed(orphaned))
             });
             (count - lines.len()) as u64
         })

@@ -269,13 +269,19 @@ mod test {
 
         // The first block was orphaned, the other one has no payout.
         let api = std::sync::Mutex::new(api);
-        let removed = |heights: &[u64], kept: &[(u64, u64)]| {
-            GupaxP2poolApi::remove_payouts(&api, heights, kept).unwrap()
+        let removed = |heights: &[u64], kept: &[(u64, u64)], orphaned: &[(u64, u64)]| {
+            GupaxP2poolApi::remove_payouts(&api, heights, kept, orphaned).unwrap()
         };
-        assert_eq!(removed(&[3500000, 3400000], &[]), 1);
-        assert_eq!(removed(&[3400000], &[]), 0);
+        assert_eq!(removed(&[3500000, 3400000], &[], &[]), 1);
+        assert_eq!(removed(&[3400000], &[], &[]), 0);
         // The block that replaced an orphaned one paid the user.
-        assert_eq!(removed(&[3500001], &[(3500001, 2)]), 0);
+        assert_eq!(removed(&[3500001], &[(3500001, 2)], &[]), 0);
+        // An orphaned block paid 30 at the height of another block of the pool.
+        api.lock()
+            .unwrap()
+            .record_found_block(&payout("0.000000000030", 3500002))
+            .unwrap();
+        assert_eq!(removed(&[], &[], &[(3500002, 30)]), 1);
 
         let mut api = api.into_inner().unwrap();
         api.read_all_files_and_update().unwrap();
@@ -564,7 +570,7 @@ mod test {
         // The block 3,500,001 was orphaned.
         let removed = std::thread::spawn({
             let api = Arc::clone(&api);
-            move || GupaxP2poolApi::remove_payouts(&api, &[3500001], &[]).unwrap()
+            move || GupaxP2poolApi::remove_payouts(&api, &[3500001], &[], &[]).unwrap()
         });
         std::thread::sleep(Duration::from_millis(100));
         // The GUI reads the history while the payout is removed.
