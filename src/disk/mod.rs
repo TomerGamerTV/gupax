@@ -188,9 +188,4 @@ pub enum File {
     Node,  // node.toml         | P2Pool manual node selector
     Pool,  // pool.toml         | XMRig manual pool selector
     Crawl, // found_nodes.toml | Crawler saved results
-
-    // Gupax-P2Pool API
-    Log,    // log    | Raw log lines of P2Pool payouts received
-    Payout, // payout | Single [u64] representing total payouts
-    Xmr,    // xmr    | Single [u64] representing total XMR mined in atomic units
 }

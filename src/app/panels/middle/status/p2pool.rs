@@ -27,7 +27,7 @@ use crate::{
         state::Status,
         status::{Hash, PayoutView},
     },
-    helper::p2pool::PubP2poolApi,
+    helper::{p2pool::PubP2poolApi, payout_sync},
     utils::constants::*,
 };
 
@@ -39,7 +39,7 @@ impl Status {
         p2pool_alive: bool,
         p2pool_api: &Arc<Mutex<PubP2poolApi>>,
     ) {
-        let api = gupax_p2pool_api.lock().unwrap();
+        let mut api = gupax_p2pool_api.lock().unwrap();
         // let height = size.y;
         // let width = size.x;
         // let text = height / 25.0;
@@ -115,6 +115,35 @@ impl Status {
                                 }
                             };
                         });
+                });
+            });
+            // Payouts sync
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    let enabled = !api.syncing && p2pool_alive;
+                    let disabled_reason = if api.syncing {
+                        STATUS_SUBMENU_REFRESH_SYNCING
+                    } else {
+                        STATUS_SUBMENU_REFRESH_NO_P2POOL
+                    };
+                    if ui
+                        .add_enabled(enabled, Button::new("Refresh"))
+                        .on_hover_text(STATUS_SUBMENU_REFRESH)
+                        .on_disabled_hover_text(disabled_reason)
+                        .clicked()
+                    {
+                        payout_sync::start(&mut api, gupax_p2pool_api);
+                    }
+                    if api.syncing {
+                        ui.spinner();
+                        if ui
+                            .add_enabled(!api.stop_sync, Button::new("Stop"))
+                            .clicked()
+                        {
+                            api.stop_sync = true;
+                        }
+                    }
+                    ui.add(Label::new(api.sync.as_str()).wrap());
                 });
             });
             // });

@@ -23,7 +23,7 @@
 //     "(DATE, ATOMIC_UNIT, MONERO_BLOCK)"
 
 use crate::human::*;
-use crate::regex::P2POOL_REGEX;
+use crate::regex::{P2POOL_REGEX, p2pool_block_height};
 
 use log::*;
 
@@ -59,14 +59,6 @@ impl AtomicUnit {
 
     pub const fn to_u64(self) -> u64 {
         self.0
-    }
-
-    #[allow(clippy::inherent_to_string_shadow_display)]
-    // This is terrible but it formats it in a different way
-    // than `Display`, but for backwards compat, changing it
-    // requires touching other code, so...
-    pub fn to_string(self) -> String {
-        self.0.to_string()
     }
 
     // pub fn sum_vec(vec: &Vec<Self>) -> Self {
@@ -155,7 +147,7 @@ impl PayoutOrd {
     }
 
     // Expected input: "NOTICE  2022-01-27 01:30:23.1377 P2Pool You received a payout of 0.000000000001 XMR in block 2642816"
-    pub fn parse_raw_payout_line(line: &str) -> (String, AtomicUnit, HumanNumber) {
+    pub fn parse_raw_payout_line(line: &str) -> (String, AtomicUnit, Option<u64>) {
         // Date
         let date = match P2POOL_REGEX.date.find(line) {
             Some(date) => date.as_str().to_string(),
@@ -183,23 +175,10 @@ impl PayoutOrd {
             AtomicUnit::new()
         };
         // Block
-        let block = if let Some(word) = P2POOL_REGEX.block.find(line) {
-            if let Some(word) = P2POOL_REGEX.block_int.find(word.as_str()) {
-                match word.as_str().parse::<u64>() {
-                    Ok(b) => HumanNumber::from_u64(b),
-                    Err(e) => {
-                        error!("P2Pool | Block parse error: [{e}] on [{line}]");
-                        HumanNumber::unknown()
-                    }
-                }
-            } else {
-                error!("P2Pool | Block parse error: [{line}]");
-                HumanNumber::unknown()
-            }
-        } else {
+        let block = p2pool_block_height(line);
+        if block.is_none() {
             error!("P2Pool | Block parse error: [{line}]");
-            HumanNumber::unknown()
-        };
+        }
         (date, atomic_unit, block)
     }
 
@@ -227,8 +206,8 @@ impl PayoutOrd {
             AtomicUnit::new()
         };
         // Block
-        let block = match P2POOL_REGEX.block_comma.find(line) {
-            Some(b) => HumanNumber::from_str(b.as_str()),
+        let block = match Self::payout_height(line) {
+            Some(height) => HumanNumber::from_u64(height),
             None => {
                 error!("P2Pool | Block parse error: [{line}]");
                 HumanNumber::unknown()
@@ -237,11 +216,33 @@ impl PayoutOrd {
         (date, atomic_unit, block)
     }
 
+    pub fn payout_height(line: &str) -> Option<u64> {
+        line.rsplit_once("Block ")?
+            .1
+            .trim()
+            .replace(',', "")
+            .parse()
+            .ok()
+    }
+
+    // Number of payouts and their total.
+    pub fn total(&self) -> (u64, AtomicUnit) {
+        let xmr = self
+            .0
+            .iter()
+            .fold(AtomicUnit::new(), |xmr, payout| xmr.add_self(payout.1));
+        (self.0.len() as u64, xmr)
+    }
+
     // Takes in input of ONLY P2Pool payout logs and converts it into a usable [PayoutOrd]
     // It expects formatted log lines like this: "2022-04-11 00:20:17.2571 | 0.001371623621 XMR | Block 2,562,511"
     pub fn update_from_payout_log(&mut self, log: &str) {
         let mut vec = Vec::with_capacity(log.lines().count());
-        for line in log.lines() {
+        // Lines without the height of a payout are skipped.
+        for line in log
+            .lines()
+            .filter(|line| Self::payout_height(line).is_some())
+        {
             debug!("PayoutOrd | Parsing line: [{line}]");
             vec.push(Self::parse_formatted_payout_line(line));
         }
@@ -259,14 +260,6 @@ impl PayoutOrd {
         let atomic_unit = AtomicUnit(atomic_unit);
         let block = HumanNumber::from_u64(block);
         self.0.push((date.to_string(), atomic_unit, block));
-    }
-    #[cfg(test)]
-    pub fn atomic_unit_sum(&self) -> AtomicUnit {
-        let mut sum: u64 = 0;
-        for (_, atomic_unit, _) in &self.0 {
-            sum += atomic_unit.to_u64();
-        }
-        AtomicUnit::from_u64(sum)
     }
 
     // Sort [Self] from highest payout to lowest
@@ -341,6 +334,17 @@ mod test {
     }
 
     #[test]
+    fn payouts_of_a_history_with_other_lines() {
+        use crate::xmr::PayoutOrd;
+        let mut payout_ord = PayoutOrd::new();
+        // A line edited by hand, then a blank one.
+        let log = "2022-09-08 18:42:55.4636 | 0.000000000001 XMR | Block 2,654,321 \n\nnotes\n";
+        payout_ord.update_from_payout_log(log);
+        assert_eq!(payout_ord.total().0, 1);
+        assert_eq!(payout_ord.total().1.to_u64(), 1);
+    }
+
+    #[test]
     fn sum_payout_ord_atomic_unit() {
         use crate::human::HumanNumber;
         use crate::xmr::AtomicUnit;
@@ -363,7 +367,7 @@ mod test {
             ),
         ]);
         println!("OG: {:#?}", payout_ord);
-        let sum = PayoutOrd::atomic_unit_sum(&payout_ord);
+        let sum = payout_ord.total().1;
         println!("SUM: {}", sum.to_u64());
         assert_eq!(sum.to_u64(), 3);
     }

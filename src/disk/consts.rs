@@ -19,20 +19,12 @@ pub const POOL_TOML: &str = "pool.toml";
 // Lives within the Gupax OS data directory.
 // ~/.local/share/gupax/p2pool/
 // ├─ payout_log  // Raw log lines of payouts received
-// ├─ payout      // Single [u64] representing total payouts
-// ├─ xmr         // Single [u64] representing total XMR mined in atomic units
 #[cfg(target_os = "windows")]
 pub const GUPAX_P2POOL_API_DIRECTORY: &str = r"p2pool\";
 #[cfg(target_family = "unix")]
 pub const GUPAX_P2POOL_API_DIRECTORY: &str = "p2pool/";
 pub const GUPAX_P2POOL_API_LOG: &str = "log";
-pub const GUPAX_P2POOL_API_PAYOUT: &str = "payout";
-pub const GUPAX_P2POOL_API_XMR: &str = "xmr";
-pub const GUPAX_P2POOL_API_FILE_ARRAY: [&str; 3] = [
-    GUPAX_P2POOL_API_LOG,
-    GUPAX_P2POOL_API_PAYOUT,
-    GUPAX_P2POOL_API_XMR,
-];
+pub const GUPAX_P2POOL_API_FILE_ARRAY: [&str; 1] = [GUPAX_P2POOL_API_LOG];
 
 #[cfg(target_os = "windows")]
 pub const DEFAULT_P2POOL_PATH: &str = r"P2Pool\p2pool.exe";

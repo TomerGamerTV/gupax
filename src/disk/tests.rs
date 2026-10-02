@@ -1,11 +1,17 @@
 //---------------------------------------------------------------------------------------------------- TESTS
 #[cfg(test)]
 mod test {
-    use crate::disk::consts::GUPAX_P2POOL_API_DIRECTORY;
-    use crate::disk::create_gupax_dir;
     use crate::disk::node::Node;
     use crate::disk::pool::Pool;
     use crate::disk::state::State;
+
+    // Line of P2Pool announcing a block of the pool that paid [xmr] at [height].
+    fn payout_line(date: &str, xmr: &str, height: u64) -> String {
+        format!(
+            "NOTICE  {date} P2Pool Your wallet 4AAA got a payout of {xmr} XMR in block {height}"
+        )
+    }
+
     #[test]
     fn serde_default_state() {
         let state = State::new();
@@ -155,28 +161,15 @@ mod test {
     #[test]
     fn create_and_serde_gupax_p2pool_api() {
         use crate::disk::gupax_p2pool_api::GupaxP2poolApi;
-        use crate::xmr::AtomicUnit;
-        use crate::xmr::PayoutOrd;
 
-        // Get API dir, fill paths.
-        let mut api = GupaxP2poolApi::new();
-        let mut path = crate::disk::get_gupax_data_path().unwrap();
-        create_gupax_dir(&path).unwrap();
-        let mut gupax_p2pool_dir = path.to_path_buf();
-        gupax_p2pool_dir.push(GUPAX_P2POOL_API_DIRECTORY);
-        crate::disk::create_gupax_p2pool_dir(&gupax_p2pool_dir).unwrap();
-        path.push(crate::disk::GUPAX_P2POOL_API_DIRECTORY);
-        GupaxP2poolApi::fill_paths(&mut api, &path);
+        // Create the files.
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = GupaxP2poolApi::temporary(dir.path());
         println!("{:#?}", api);
 
-        // Create, write some fake data.
-        GupaxP2poolApi::create_all_files(&path).unwrap();
-        api.log        = "NOTICE  2022-01-27 01:30:23.1377 P2Pool You received a payout of 0.000000000001 XMR in block 2642816".to_string();
-        api.payout_u64 = 1;
-        api.xmr = AtomicUnit::from_u64(2);
-        let (date, atomic_unit, block) = PayoutOrd::parse_raw_payout_line(&api.log);
-        let formatted_log_line = GupaxP2poolApi::format_payout(&date, &atomic_unit, &block);
-        GupaxP2poolApi::write_to_all_files(&api, &formatted_log_line).unwrap();
+        // Write some fake data.
+        let line = "NOTICE  2022-01-27 01:30:23.1377 P2Pool You received a payout of 0.000000000001 XMR in block 2642816";
+        api.record_found_block(line).unwrap();
         println!("AFTER WRITE: {:#?}", api);
 
         // Read
@@ -185,7 +178,7 @@ mod test {
 
         // Assert that the file read mutated the internal struct correctly.
         assert_eq!(api.payout_u64, 1);
-        assert_eq!(api.xmr.to_u64(), 2);
+        assert_eq!(api.xmr.to_u64(), 1);
         assert!(!api.payout_ord.is_empty());
         assert!(
             api.log
@@ -246,6 +239,262 @@ mod test {
         let args =
             p2pool.start_options(path, &backup_nodes, StartOptionsMode::Simple, 18084, 18089);
         assert!(args.contains("--host 127.0.0.1 --rpc-port 18089 --zmq-port 18084"));
+    }
+
+    #[test]
+    fn record_the_blocks_found_by_p2pool() {
+        use crate::disk::gupax_p2pool_api::GupaxP2poolApi;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = GupaxP2poolApi::temporary(dir.path());
+        let payout = |xmr: &str, height: u64| payout_line("2026-10-01 10:00:00.1234", xmr, height);
+        api.record_found_block(&payout("0.000000000002", 3500001))
+            .unwrap();
+        api.record_found_block(&payout("0.000000000005", 3500002))
+            .unwrap();
+        // Another block of the pool replaced the block 3,500,001.
+        api.record_found_block(&payout("0.000000000030", 3500001))
+            .unwrap();
+        // The block that replaced the block 3,500,002 paid the user nothing.
+        let no_payout = "NOTICE  2026-10-01 10:00:00.1234 P2Pool Your wallet 4AAA didn't get a payout in block 3500002";
+        api.record_found_block(no_payout).unwrap();
+        assert_eq!((api.payout_u64, api.xmr.to_u64()), (1, 30));
+        assert_eq!(
+            api.log,
+            "2026-10-01 10:00:00.1234 | 0.000000000030 XMR | Block 3,500,001\n"
+        );
+        // The history was deleted.
+        std::fs::remove_file(&api.path_log).unwrap();
+        api.record_found_block(&payout("0.000000000004", 3500003))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&api.path_log).unwrap(),
+            "2026-10-01 10:00:00.1234 | 0.000000000004 XMR | Block 3,500,003\n"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn history_behind_a_link() {
+        use crate::disk::gupax_p2pool_api::GupaxP2poolApi;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = GupaxP2poolApi::temporary(dir.path());
+        // The history is a link to a file kept elsewhere.
+        let target = dir.path().join("synced_log");
+        std::fs::rename(&api.path_log, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &api.path_log).unwrap();
+        let payout = |xmr: &str, height: u64| payout_line("2026-10-01 10:00:00.0000", xmr, height);
+        api.record_found_block(&payout("0.000000000002", 3500001))
+            .unwrap();
+        assert!(api.path_log.is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "2026-10-01 10:00:00.0000 | 0.000000000002 XMR | Block 3,500,001\n"
+        );
+        // The file behind the link is unreachable.
+        let synced = std::fs::read_to_string(&target).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        assert!(
+            api.record_found_block(&payout("0.000000000003", 3500002))
+                .is_err()
+        );
+        assert!(api.path_log.is_symlink());
+        assert_eq!(api.payout_u64, 2);
+        // Another block of the pool replaced the block 3,500,001.
+        assert!(
+            api.record_found_block(&payout("0.000000000030", 3500001))
+                .is_err()
+        );
+        // The payouts are written once the file is back.
+        std::fs::write(&target, synced).unwrap();
+        api.record_found_block(&payout("0.000000000004", 3500003))
+            .unwrap();
+        assert_eq!(api.payout_u64, 3);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "2026-10-01 10:00:00.0000 | 0.000000000003 XMR | Block 3,500,002\n\
+             2026-10-01 10:00:00.0000 | 0.000000000030 XMR | Block 3,500,001\n\
+             2026-10-01 10:00:00.0000 | 0.000000000004 XMR | Block 3,500,003\n"
+        );
+
+        // Gupax starts while the file behind the link is unreachable.
+        std::fs::remove_file(&target).unwrap();
+        GupaxP2poolApi::create_all_files(dir.path()).unwrap();
+        assert!(!target.exists());
+        api.read_all_files_and_update().unwrap();
+        assert_eq!(api.payout_u64, 0);
+    }
+
+    #[test]
+    fn history_shared_by_rigs() {
+        use crate::disk::gupax_p2pool_api::GupaxP2poolApi;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut rig_a = GupaxP2poolApi::temporary(dir.path());
+        let mut rig_b = GupaxP2poolApi::temporary(dir.path());
+        // This rig mines to the wallet of the rig A.
+        let mut rig_c = GupaxP2poolApi::temporary(dir.path());
+        let payout = |xmr: &str, height: u64| payout_line("2026-10-01 10:00:00.1234", xmr, height);
+        // The block 3,500,001 paid the wallets of the rigs A and B.
+        rig_a
+            .record_found_block(&payout("0.000000000002", 3500001))
+            .unwrap();
+        rig_b
+            .record_found_block(&payout("0.000000000030", 3500001))
+            .unwrap();
+        // The block 3,500,002 paid only the wallet of the rig A.
+        rig_a
+            .record_found_block(&payout("0.000000000005", 3500002))
+            .unwrap();
+        rig_c
+            .record_found_block(&payout("0.000000000005", 3500002))
+            .unwrap();
+        let no_payout = "NOTICE  2026-10-01 10:00:00.1234 P2Pool Your wallet 4BBB didn't get a payout in block 3500002";
+        rig_b.record_found_block(no_payout).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&rig_a.path_log).unwrap(),
+            "2026-10-01 10:00:00.1234 | 0.000000000002 XMR | Block 3,500,001\n\
+             2026-10-01 10:00:00.1234 | 0.000000000030 XMR | Block 3,500,001\n\
+             2026-10-01 10:00:00.1234 | 0.000000000005 XMR | Block 3,500,002\n"
+        );
+    }
+
+    #[test]
+    fn history_written_by_rigs_at_once() {
+        use crate::disk::gupax_p2pool_api::GupaxP2poolApi;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Each rig mines to its own wallet.
+        let rigs = [
+            (GupaxP2poolApi::temporary(dir.path()), "0.000000000002"),
+            (GupaxP2poolApi::temporary(dir.path()), "0.000000000030"),
+        ];
+        let path_log = rigs[0].0.path_log.clone();
+        let heights = 3500000..3500050;
+        // Both P2Pool announce each block at the same time.
+        let announced = std::sync::Barrier::new(rigs.len());
+        std::thread::scope(|scope| {
+            for (mut rig, xmr) in rigs {
+                let heights = heights.clone();
+                let announced = &announced;
+                scope.spawn(move || {
+                    for height in heights {
+                        let line = payout_line("2026-10-01 10:00:00.1234", xmr, height);
+                        announced.wait();
+                        rig.record_found_block(&line).unwrap();
+                    }
+                });
+            }
+        });
+        let log = std::fs::read_to_string(path_log).unwrap();
+        assert_eq!(log.lines().count(), 2 * heights.count());
+    }
+
+    #[test]
+    fn history_edited_elsewhere() {
+        use crate::disk::gupax_p2pool_api::GupaxP2poolApi;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = GupaxP2poolApi::temporary(dir.path());
+        // The history was saved by hand without a final line break.
+        let edited = "2026-10-01 10:00:00.1234 | 0.000000000002 XMR | Block 3,500,001";
+        std::fs::write(&api.path_log, edited).unwrap();
+        api.read_all_files_and_update().unwrap();
+        let payout = |xmr: &str, height: u64| payout_line("2026-10-01 10:00:00.1234", xmr, height);
+        api.record_found_block(&payout("0.000000000007", 3500002))
+            .unwrap();
+        // The history holds this payout 1 atomic unit lower.
+        let truncated = "2026-10-01 10:00:00.1234 | 0.000496318619 XMR | Block 3,500,003\n";
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&api.path_log)
+            .unwrap();
+        std::io::Write::write_all(&mut file, truncated.as_bytes()).unwrap();
+        api.record_found_block(&payout("0.000496318620", 3500003))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&api.path_log).unwrap(),
+            format!(
+                "{edited}\n2026-10-01 10:00:00.1234 | 0.000000000007 XMR | Block 3,500,002\n{truncated}"
+            )
+        );
+        assert_eq!((api.payout_u64, api.xmr.to_u64()), (3, 496318628));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn history_rewritten_in_place() {
+        use crate::disk::gupax_p2pool_api::GupaxP2poolApi;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = GupaxP2poolApi::temporary(dir.path());
+        // The history is shared through a hard link, with the rights of its group.
+        let shared = dir.path().join("shared_log");
+        std::fs::hard_link(&api.path_log, &shared).unwrap();
+        let rights = std::fs::Permissions::from_mode(0o660);
+        std::fs::set_permissions(&shared, rights).unwrap();
+        let payout = |xmr: &str, height: u64| payout_line("2026-10-01 10:00:00.1234", xmr, height);
+        api.record_found_block(&payout("0.000000000002", 3500001))
+            .unwrap();
+        api.record_found_block(&payout("0.000000000005", 3500002))
+            .unwrap();
+        // Another block of the pool replaced the block 3,500,001.
+        api.record_found_block(&payout("0.000000000030", 3500001))
+            .unwrap();
+        let file = std::fs::metadata(&api.path_log).unwrap();
+        assert_eq!(file.ino(), std::fs::metadata(&shared).unwrap().ino());
+        assert_eq!(file.mode() & 0o777, 0o660);
+        assert_eq!(
+            std::fs::read_to_string(&shared).unwrap(),
+            "2026-10-01 10:00:00.1234 | 0.000000000005 XMR | Block 3,500,002\n\
+             2026-10-01 10:00:00.1234 | 0.000000000030 XMR | Block 3,500,001\n"
+        );
+    }
+
+    #[test]
+    fn history_edited_outside_the_lock() {
+        use crate::disk::gupax_p2pool_api::GupaxP2poolApi;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = GupaxP2poolApi::temporary(dir.path());
+        let payout = |xmr: &str, height: u64| payout_line("2026-10-01 10:00:00.1234", xmr, height);
+        api.record_found_block(&payout("0.000000000002", 3500001))
+            .unwrap();
+        let api = Arc::new(Mutex::new(api));
+        // Another Gupax is writing the history.
+        let file = std::fs::File::open(&api.lock().unwrap().path_log).unwrap();
+        file.lock().unwrap();
+        // The block 3,500,001 was orphaned.
+        let removed = std::thread::spawn({
+            let api = Arc::clone(&api);
+            move || GupaxP2poolApi::remove_payouts(&api, &[3500001]).unwrap()
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        // The GUI reads the history while the payout is removed.
+        assert!(!removed.is_finished());
+        assert!(api.try_lock().is_ok());
+        // P2Pool announces a payout meanwhile.
+        let announced = std::thread::spawn({
+            let api = Arc::clone(&api);
+            move || {
+                let line = payout("0.000000000005", 3500002);
+                api.lock().unwrap().record_found_block(&line).unwrap();
+            }
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        drop(file);
+        assert_eq!(removed.join().unwrap(), 1);
+        announced.join().unwrap();
+        let api = api.lock().unwrap();
+        assert_eq!(
+            api.log,
+            "2026-10-01 10:00:00.1234 | 0.000000000005 XMR | Block 3,500,002\n"
+        );
+        assert_eq!(std::fs::read_to_string(&api.path_log).unwrap(), api.log);
     }
 
     #[test]

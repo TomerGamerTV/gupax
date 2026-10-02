@@ -173,23 +173,10 @@ impl Helper {
                 continue;
             }
             //			println!("{}", line); // For debugging.
-            if P2POOL_REGEX.payout.is_match(&line) {
-                debug!("P2Pool PTY | Found payout, attempting write: {line}");
-                let (date, atomic_unit, block) = PayoutOrd::parse_raw_payout_line(&line);
-                let formatted_log_line = GupaxP2poolApi::format_payout(&date, &atomic_unit, &block);
-                GupaxP2poolApi::add_payout(
-                    &mut gupax_p2pool_api.lock().unwrap(),
-                    &formatted_log_line,
-                    date,
-                    atomic_unit,
-                    block,
-                );
-                if let Err(e) = GupaxP2poolApi::write_to_all_files(
-                    &gupax_p2pool_api.lock().unwrap(),
-                    &formatted_log_line,
-                ) {
-                    error!("P2Pool PTY GupaxP2poolApi | Write error: {e}");
-                }
+            if line.contains("payout")
+                && let Err(e) = gupax_p2pool_api.lock().unwrap().record_found_block(&line)
+            {
+                error!("P2Pool PTY GupaxP2poolApi | Write error: {e}");
             }
             if let Err(e) = writeln!(output_parse.lock().unwrap(), "{line}") {
                 error!("P2Pool PTY Parse | Output error: {e}");
@@ -356,6 +343,8 @@ impl Helper {
             .as_ref()
             .expect("P2Pool should always be started with a node set")
             .clone();
+        let nodes = P2poolNodes::from_args(&args);
+        gupax_p2pool_api.lock().unwrap().nodes = nodes;
         // thread to check if the button for switching to local node if it is synced to restart p2pool.
         // starting the thread even if the option is disabled allows to apply the change immediately in case it is enabled again without asking the user to restart p2pool.
         // Start this thread only if we don't already override to local node
@@ -462,6 +451,10 @@ impl Helper {
                 in_peers: state.in_peers.to_string(),
             };
         }
+        // Sources of the payout sync.
+        let gupax_p2pool_api = Arc::clone(&helper.lock().unwrap().gupax_p2pool_api);
+        let mut api = gupax_p2pool_api.lock().unwrap();
+        api.found_blocks = api_path.join(P2POOL_API_PATH_BLOCKS);
         let mut api_path_local = api_path.clone();
         let mut api_path_network = api_path.clone();
         let mut api_path_pool = api_path.clone();
@@ -664,14 +657,14 @@ impl Helper {
         debug!("P2Pool | Spawning PTY read thread...");
         let output_parse = Arc::clone(&process.lock().unwrap().output_parse);
         let output_pub = Arc::clone(&process.lock().unwrap().output_pub);
-        let gupax_p2pool_api = Arc::clone(&gupax_p2pool_api);
+        let gupax_p2pool_api_c = Arc::clone(&gupax_p2pool_api);
         let p2pool_api_c = Arc::clone(&gui_api);
         tokio::spawn(async move {
             Self::read_pty_p2pool(
                 output_parse,
                 output_pub,
                 stdout_reader,
-                gupax_p2pool_api,
+                gupax_p2pool_api_c,
                 p2pool_api_c,
             );
         });
@@ -853,6 +846,8 @@ impl Helper {
         }
 
         // 5. If loop broke, we must be done here.
+        // A payout sync runs only while P2Pool runs.
+        gupax_p2pool_api.lock().unwrap().stop_sync = true;
         info!("P2Pool Watchdog | Watchdog thread exiting... Goodbye!");
     }
     #[tokio::main]
@@ -903,6 +898,58 @@ impl Helper {
         }
     }
 }
+//---------------------------------------------------------------------------------------------------- [P2poolNodes]
+// Monero nodes in the arguments of P2Pool.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct P2poolNodes {
+    pub hosts: Vec<P2poolHost>, // In the order P2Pool connects to them
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct P2poolHost {
+    pub node: NodeString,
+}
+
+impl Default for P2poolHost {
+    // Defaults of P2Pool.
+    fn default() -> Self {
+        Self {
+            node: NodeString {
+                ip: "127.0.0.1".to_string(),
+                rpc: NODE_RPC_PORT_DEFAULT.to_string(),
+                zmq: NODE_ZMQ_PORT_DEFAULT.to_string(),
+            },
+        }
+    }
+}
+
+impl P2poolNodes {
+    pub fn from_args(args: &[String]) -> Self {
+        let mut nodes = Self::default();
+        // P2Pool applies the host options to its last host, created by the first of them.
+        let mut host: Option<P2poolHost> = None;
+        for (i, arg) in args.iter().enumerate() {
+            let value = args.get(i + 1).filter(|value| !value.starts_with("--"));
+            match (arg.as_str(), value.cloned()) {
+                ("--host", Some(ip)) => {
+                    // A new host keeps the ports of the previous one.
+                    let node = NodeString {
+                        ip,
+                        ..host.clone().unwrap_or_default().node
+                    };
+                    let new = P2poolHost { node };
+                    nodes.hosts.extend(host.replace(new));
+                }
+                ("--rpc-port", Some(port)) => host.get_or_insert_default().node.rpc = port,
+                ("--zmq-port", Some(port)) => host.get_or_insert_default().node.zmq = port,
+                _ => (),
+            }
+        }
+        nodes.hosts.push(host.unwrap_or_default());
+        nodes
+    }
+}
+
 //---------------------------------------------------------------------------------------------------- [ImgP2pool]
 // A static "image" of data that P2Pool started with.
 // This is just a snapshot of the user data when they initially started P2Pool.
