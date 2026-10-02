@@ -17,14 +17,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use egui::{Button, Label, RichText, ScrollArea, Separator, Slider, TextStyle};
+use egui::{Button, Label, RichText, ScrollArea, Separator, Slider, TextEdit, TextStyle};
 use readable::num::Unsigned;
 use strum::{EnumCount, IntoEnumIterator};
 
 use crate::{
     disk::{
         gupax_p2pool_api::GupaxP2poolApi,
-        state::Status,
+        state::{Observer, P2poolChain, Status},
         status::{Hash, PayoutView},
     },
     helper::{p2pool::PubP2poolApi, payout_sync},
@@ -38,6 +38,7 @@ impl Status {
         gupax_p2pool_api: &Arc<Mutex<GupaxP2poolApi>>,
         p2pool_alive: bool,
         p2pool_api: &Arc<Mutex<PubP2poolApi>>,
+        observers: &mut Vec<Observer>,
     ) {
         let mut api = gupax_p2pool_api.lock().unwrap();
         // let height = size.y;
@@ -119,6 +120,68 @@ impl Status {
             });
             // Payouts sync
             ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.add_sized([0.0, height], Label::new("Observers"));
+                    if ui
+                        .add_enabled(observers.len() < P2poolChain::COUNT, Button::new("+"))
+                        .on_hover_text(STATUS_SUBMENU_ADD_OBSERVER)
+                        .clicked()
+                    {
+                        observers.push(Observer::default());
+                    }
+                });
+                let used: Vec<P2poolChain> =
+                    observers.iter().filter_map(|o| o.chain.clone()).collect();
+                let mut removed = None;
+                for (index, observer) in observers.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        // The chain menu gets the height of the other buttons of the row.
+                        ui.spacing_mut().icon_width = size_text;
+                        let selected = observer
+                            .chain
+                            .as_ref()
+                            .map_or("Chain".to_string(), ToString::to_string);
+                        egui::ComboBox::from_id_salt(("observer", index))
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                for chain in P2poolChain::iter() {
+                                    if observer.chain.as_ref() == Some(&chain)
+                                        || !used.contains(&chain)
+                                    {
+                                        let text = chain.to_string();
+                                        ui.selectable_value(&mut observer.chain, Some(chain), text);
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(STATUS_SUBMENU_OBSERVER_CHAIN);
+                        let hint = observer
+                            .chain
+                            .as_ref()
+                            .map_or("", P2poolChain::public_observer);
+                        ui.add_enabled(
+                            observer.chain.is_some(),
+                            TextEdit::singleline(&mut observer.url)
+                                .hint_text(hint)
+                                .desired_width(ui.available_width() / 3.0),
+                        )
+                        .on_hover_text(STATUS_SUBMENU_OBSERVER);
+                        if ui
+                            .button("-")
+                            .on_hover_text(STATUS_SUBMENU_REMOVE_OBSERVER)
+                            .clicked()
+                        {
+                            removed = Some(index);
+                        }
+                    });
+                }
+                if let Some(index) = removed {
+                    observers.remove(index);
+                }
+                // The payout sync uses a copy of the observers.
+                if api.observers != *observers {
+                    api.observers.clone_from(observers);
+                }
                 ui.horizontal(|ui| {
                     let enabled = !api.syncing && p2pool_alive;
                     let disabled_reason = if api.syncing {

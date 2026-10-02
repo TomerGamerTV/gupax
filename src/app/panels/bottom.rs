@@ -702,6 +702,11 @@ impl crate::app::App {
                     self.state.xmrig = og.xmrig;
                     self.state.xmrig_proxy = og.xmrig_proxy;
                     self.state.xvb = og.xvb;
+                    self.gupax_p2pool_api
+                        .lock()
+                        .unwrap()
+                        .observers
+                        .clone_from(&self.state.p2pool.observers);
                     self.node_vec.clone_from(&self.og_node_vec);
                     self.pool_vec.clone_from(&self.og_pool_vec);
                 }

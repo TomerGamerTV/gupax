@@ -13,6 +13,15 @@ mod test {
     }
 
     #[test]
+    fn state_of_the_previous_release() {
+        let state = State::to_string(&State::new()).unwrap();
+        let previous = state.replace("observers = []\n", "");
+        assert_ne!(previous, state);
+        // The version check reads the state before any merge.
+        assert!(State::from_str(&previous).is_ok());
+    }
+
+    #[test]
     fn serde_default_state() {
         let state = State::new();
         let string = State::to_string(&state).unwrap();
@@ -239,6 +248,90 @@ mod test {
         let args =
             p2pool.start_options(path, &backup_nodes, StartOptionsMode::Simple, 18084, 18089);
         assert!(args.contains("--host 127.0.0.1 --rpc-port 18089 --zmq-port 18084"));
+    }
+
+    #[test]
+    fn remove_orphaned_payouts() {
+        use crate::disk::gupax_p2pool_api::GupaxP2poolApi;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = GupaxP2poolApi::temporary(dir.path());
+        let payout = |xmr: &str, height: u64| payout_line("2026-10-01 10:00:00.0000", xmr, height);
+        api.record_found_block(&payout("0.000496318620", 3500000))
+            .unwrap();
+        api.record_found_block(&payout("0.000000000002", 3500001))
+            .unwrap();
+        assert_eq!(api.xmr.to_u64(), 496318622);
+        // Another Gupax adds a payout.
+        api.clone()
+            .record_found_block(&payout("0.000000000003", 3500002))
+            .unwrap();
+
+        // The first block was orphaned, the other one has no payout.
+        let api = std::sync::Mutex::new(api);
+        let removed = |heights: &[u64], kept: &[(u64, u64)]| {
+            GupaxP2poolApi::remove_payouts(&api, heights, kept).unwrap()
+        };
+        assert_eq!(removed(&[3500000, 3400000], &[]), 1);
+        assert_eq!(removed(&[3400000], &[]), 0);
+        // The block that replaced an orphaned one paid the user.
+        assert_eq!(removed(&[3500001], &[(3500001, 2)]), 0);
+
+        let mut api = api.into_inner().unwrap();
+        api.read_all_files_and_update().unwrap();
+        assert_eq!(api.payout_u64, 2);
+        assert_eq!(api.xmr.to_u64(), 5);
+        assert_eq!(
+            api.log,
+            "2026-10-01 10:00:00.0000 | 0.000000000002 XMR | Block 3,500,001\n\
+             2026-10-01 10:00:00.0000 | 0.000000000003 XMR | Block 3,500,002\n"
+        );
+    }
+
+    #[test]
+    fn merge_synced_payouts() {
+        use crate::disk::gupax_p2pool_api::GupaxP2poolApi;
+        use crate::xmr::AtomicUnit;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = GupaxP2poolApi::temporary(dir.path());
+        // Payouts seen in the P2Pool output, the first one truncated, 1 atomic unit lower.
+        api.record_found_block(&payout_line(
+            "2026-09-29 10:00:00.0000",
+            "0.000496318619",
+            3498000,
+        ))
+        .unwrap();
+        api.record_found_block(&payout_line(
+            "2026-10-01 10:00:00.1234",
+            "0.000000000002",
+            3500001,
+        ))
+        .unwrap();
+
+        // The synced payouts include them, an older one, and one to another address in a block.
+        let payouts = [
+            ("2026-09-29 10:00:00.0000", 496318620, 3498000),
+            ("2026-10-01 10:00:00.0000", 2, 3500001),
+            ("2026-09-30 10:00:00.0000", 5, 3499000),
+            ("2026-10-01 10:00:00.0000", 30, 3500001),
+        ]
+        .map(|(date, amount, height)| (date.to_string(), AtomicUnit::from_u64(amount), height));
+        let api = std::sync::Mutex::new(api);
+        assert_eq!(GupaxP2poolApi::merge_payouts(&api, &payouts).unwrap(), 2);
+        assert_eq!(GupaxP2poolApi::merge_payouts(&api, &payouts).unwrap(), 0);
+
+        let mut api = api.into_inner().unwrap();
+        api.read_all_files_and_update().unwrap();
+        assert_eq!(api.payout_u64, 4);
+        assert_eq!(api.xmr.to_u64(), 496318656);
+        assert_eq!(
+            api.log,
+            "2026-09-29 10:00:00.0000 | 0.000496318619 XMR | Block 3,498,000\n\
+             2026-09-30 10:00:00.0000 | 0.000000000005 XMR | Block 3,499,000\n\
+             2026-10-01 10:00:00.0000 | 0.000000000030 XMR | Block 3,500,001\n\
+             2026-10-01 10:00:00.1234 | 0.000000000002 XMR | Block 3,500,001\n"
+        );
     }
 
     #[test]
@@ -471,7 +564,7 @@ mod test {
         // The block 3,500,001 was orphaned.
         let removed = std::thread::spawn({
             let api = Arc::clone(&api);
-            move || GupaxP2poolApi::remove_payouts(&api, &[3500001]).unwrap()
+            move || GupaxP2poolApi::remove_payouts(&api, &[3500001], &[]).unwrap()
         });
         std::thread::sleep(Duration::from_millis(100));
         // The GUI reads the history while the payout is removed.

@@ -16,6 +16,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use super::*;
+use crate::disk::state::{Observer, P2poolChain};
 use crate::helper::p2pool::P2poolNodes;
 use crate::utils::regex::{P2POOL_REGEX, contains_no_payout, p2pool_block_height};
 use std::collections::{HashMap, HashSet};
@@ -31,12 +32,16 @@ pub struct GupaxP2poolApi {
     pub payout_high: String, // Same as above but high -> low
     pub xmr: AtomicUnit,    // XMR stored as atomic units
     pub path_log: PathBuf,  // Path to [log]
+    pub path_scan: PathBuf, // Path to [scan]
     pub sync: String,       // Result of the last payouts sync
     pub syncing: bool,
     pub stop_sync: bool,
     pub found_blocks: PathBuf, // Blocks found by the pool, in the data API of the running P2Pool
     pub final_checked: HashSet<u64>, // Heights of the final blocks of the pool checked for orphans
+    pub address: String,       // Address the running P2Pool pays
+    pub chain: P2poolChain,    // Chain of the running P2Pool
     pub nodes: P2poolNodes,    // Monero nodes of the running P2Pool
+    pub observers: Vec<Observer>, // Observers used to sync the payouts
     announced: HashMap<u64, u64>, // Amount of the payout P2Pool announced at each height
     pending: Vec<String>,      // Payout lines of [log] missing from its file
     replaced: Vec<(u64, u64)>, // (height, amount) of the replaced payouts left in the file of [log]
@@ -61,12 +66,16 @@ impl GupaxP2poolApi {
             payout_high: String::new(),
             xmr: AtomicUnit::new(),
             path_log: PathBuf::new(),
+            path_scan: PathBuf::new(),
             sync: String::new(),
             syncing: false,
             stop_sync: false,
             found_blocks: PathBuf::new(),
             final_checked: HashSet::new(),
+            address: String::new(),
+            chain: P2poolChain::default(),
             nodes: P2poolNodes::default(),
+            observers: Vec::new(),
             announced: HashMap::new(),
             pending: Vec::new(),
             replaced: Vec::new(),
@@ -85,9 +94,12 @@ impl GupaxP2poolApi {
 
     pub fn fill_paths(&mut self, gupax_p2pool_dir: &Path) {
         let mut path_log = gupax_p2pool_dir.to_path_buf();
+        let mut path_scan = gupax_p2pool_dir.to_path_buf();
         path_log.push(GUPAX_P2POOL_API_LOG);
+        path_scan.push(GUPAX_P2POOL_API_SCAN);
         *self = Self {
             path_log,
+            path_scan,
             ..std::mem::take(self)
         };
     }
@@ -191,6 +203,13 @@ impl GupaxP2poolApi {
         self.update_payout_high();
     }
 
+    #[cfg(test)]
+    pub fn has_payout(&self, height: u64) -> bool {
+        self.log
+            .lines()
+            .any(|line| PayoutOrd::payout_height(line) == Some(height))
+    }
+
     // Records the payout that P2Pool announces in [line], in place of the payout it announced before
     // at the same height: another block of the pool replaced that block.
     pub fn record_found_block(&mut self, line: &str) -> Result<(), TomlError> {
@@ -222,18 +241,82 @@ impl GupaxP2poolApi {
         self.add(Self::format_payout(&date, &atomic_unit, &block))
     }
 
-    // Removes the payouts received in the blocks at [heights] and updates [api] and the files.
-    // Returns the number of payouts removed.
-    pub fn remove_payouts(api: &Mutex<Self>, heights: &[u64]) -> Result<u64, TomlError> {
+    // Removes the payouts received in the blocks at [heights], except the (height, amount)
+    // payouts [kept], and updates [api] and the files. Returns the number of payouts removed.
+    pub fn remove_payouts(
+        api: &Mutex<Self>,
+        heights: &[u64],
+        kept: &[(u64, u64)],
+    ) -> Result<u64, TomlError> {
         if heights.is_empty() {
             return Ok(0);
         }
         Self::edit_unlocked(api, |lines| {
             let count = lines.len();
             lines.retain(|line| {
-                PayoutOrd::payout_height(line).is_none_or(|height| !heights.contains(&height))
+                let Some(height) =
+                    PayoutOrd::payout_height(line).filter(|height| heights.contains(height))
+                else {
+                    return true;
+                };
+                let amount = PayoutOrd::parse_formatted_payout_line(line).1.to_u64();
+                kept.iter().any(|&(kept_height, kept_amount)| {
+                    kept_height == height && Self::same_amount(kept_amount, amount)
+                })
             });
             (count - lines.len()) as u64
+        })
+    }
+
+    // Adds the (date, atomic_unit, height) payouts missing from the history,
+    // updates [api] and the files. Returns the number of payouts added.
+    pub fn merge_payouts(
+        api: &Mutex<Self>,
+        payouts: &[(String, AtomicUnit, u64)],
+    ) -> Result<u64, TomlError> {
+        if payouts.is_empty() {
+            return Ok(0);
+        }
+        Self::edit_unlocked(api, |lines| {
+            // A block may pay several addresses of the user: a payout is told apart by block and amount.
+            let mut paid: HashMap<u64, Vec<u64>> = payouts
+                .iter()
+                .map(|(_, _, height)| (*height, Vec::new()))
+                .collect();
+            for line in lines.iter() {
+                if let Some(amounts) =
+                    PayoutOrd::payout_height(line).and_then(|height| paid.get_mut(&height))
+                {
+                    amounts.push(PayoutOrd::parse_formatted_payout_line(line).1.to_u64());
+                }
+            }
+            let mut added = Vec::new();
+            for (date, atomic_unit, height) in payouts {
+                let amounts = paid.entry(*height).or_default();
+                let amount = atomic_unit.to_u64();
+                if !amounts.iter().any(|&paid| Self::same_amount(paid, amount)) {
+                    amounts.push(amount);
+                    let block = HumanNumber::from_u64(*height);
+                    added.push(Self::format_payout(date, atomic_unit, &block));
+                }
+            }
+            let count = added.len() as u64;
+            // Each payout added goes before the first later payout, since a line starts with its
+            // date.
+            added.sort();
+            let mut added = added.into_iter().peekable();
+            let mut merged = Vec::with_capacity(lines.len());
+            for line in lines.drain(..) {
+                if PayoutOrd::payout_height(&line).is_some() {
+                    merged.extend(std::iter::from_fn(|| {
+                        added.next_if(|payout| *payout < line)
+                    }));
+                }
+                merged.push(line);
+            }
+            merged.extend(added);
+            *lines = merged;
+            count
         })
     }
 
@@ -419,5 +502,45 @@ impl GupaxP2poolApi {
             file.set_len(edited.len() as u64)?;
         }
         Ok(value)
+    }
+
+    // Next block the payout sync of [address] with [source] reads, in the file [path].
+    pub fn read_scan(path: &Path, source: &str, address: &str) -> Option<u64> {
+        let key = format!("{source} {address}");
+        Self::read_file(path).ok()?.lines().find_map(|line| {
+            let (height, scanned) = line.split_once(' ')?;
+            if scanned == key {
+                height.parse().ok()
+            } else {
+                None
+            }
+        })
+    }
+
+    // Writes [height] as the next block the payout sync of [address] with [source] reads, in the
+    // file [path], unless a reset of the payouts removed the block [saved] before. Returns whether
+    // it wrote it.
+    pub fn write_scan(
+        path: &Path,
+        height: u64,
+        source: &str,
+        address: &str,
+        saved: bool,
+    ) -> Result<bool, TomlError> {
+        let key = format!("{source} {address}");
+        Ok(Self::edit_file(path, |scan| {
+            let mut lines: Vec<&str> = scan.lines().collect();
+            let count = lines.len();
+            lines.retain(|line| {
+                line.split_once(' ')
+                    .is_none_or(|(_, scanned)| scanned != key)
+            });
+            if saved && lines.len() == count {
+                return (scan.to_string(), false);
+            }
+            let mut scan: String = lines.iter().map(|line| format!("{line}\n")).collect();
+            scan.push_str(&format!("{height} {key}\n"));
+            (scan, true)
+        })?)
     }
 }

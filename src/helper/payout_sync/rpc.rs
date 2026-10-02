@@ -53,7 +53,7 @@ impl NodeRpc {
     }
 
     // Client of the RPC.
-    fn client(&self) -> anyhow::Result<NodeClient<'_>> {
+    pub(super) fn client(&self) -> anyhow::Result<NodeClient<'_>> {
         let client = reqwest::Client::builder()
             .read_timeout(READ_TIMEOUT)
             .build()?;

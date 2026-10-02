@@ -397,7 +397,7 @@ impl Helper {
         let mut api_path = path.to_path_buf();
         api_path.pop();
         let simple = state.submenu != SubmenuP2pool::Advanced;
-        if simple {
+        let (chain, address) = if simple {
             *helper.lock().unwrap().img_p2pool.lock().unwrap() = ImgP2pool {
                 chain: P2poolChain::Nano.to_string(),
                 address: Self::head_tail_of_monero_address(&state.address),
@@ -405,10 +405,12 @@ impl Helper {
                 in_peers: "10".to_string(),
                 stratum_port: P2POOL_PORT_DEFAULT,
             };
+            (P2poolChain::Nano, state.address.clone())
         } else if !state.arguments.is_empty() {
             // This parses the input and attempts to fill out
             // the [ImgP2pool]... This is pretty bad code...
             let mut last = "";
+            let mut wallet = "";
             let lock = helper.lock().unwrap();
             let mut p2pool_image = lock.img_p2pool.lock().unwrap();
             let mut chain = P2poolChain::Main;
@@ -424,7 +426,10 @@ impl Helper {
                         chain = P2poolChain::Nano;
                         p2pool_image.chain = chain.to_string();
                     }
-                    "--wallet" => p2pool_image.address = Self::head_tail_of_monero_address(arg),
+                    "--wallet" => {
+                        p2pool_image.address = Self::head_tail_of_monero_address(arg);
+                        wallet = arg;
+                    }
                     "--out-peers" => p2pool_image.out_peers = arg.to_string(),
                     "--in-peers" => p2pool_image.in_peers = arg.to_string(),
                     "--data-api" => api_path = path.parent().unwrap_or(path).join(arg),
@@ -442,6 +447,7 @@ impl Helper {
                 let arg = if arg == "localhost" { "127.0.0.1" } else { arg };
                 last = arg;
             }
+            (chain, wallet.to_string())
         } else {
             *helper.lock().unwrap().img_p2pool.lock().unwrap() = ImgP2pool {
                 chain: state.chain.to_string(),
@@ -450,10 +456,13 @@ impl Helper {
                 out_peers: state.out_peers.to_string(),
                 in_peers: state.in_peers.to_string(),
             };
-        }
+            (state.chain.clone(), state.address.clone())
+        };
         // Sources of the payout sync.
         let gupax_p2pool_api = Arc::clone(&helper.lock().unwrap().gupax_p2pool_api);
         let mut api = gupax_p2pool_api.lock().unwrap();
+        api.address = address;
+        api.chain = chain;
         api.found_blocks = api_path.join(P2POOL_API_PATH_BLOCKS);
         let mut api_path_local = api_path.clone();
         let mut api_path_network = api_path.clone();
