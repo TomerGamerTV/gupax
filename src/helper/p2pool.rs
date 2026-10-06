@@ -324,8 +324,9 @@ impl Helper {
             local_node_rpc,
             mode,
         );
+        let read_args = Self::read_params_file(&args, path.parent().unwrap_or(path));
         let (api_path_local, api_path_network, api_path_pool, api_path_p2p) =
-            Self::mutate_img_p2pool(state, helper, path);
+            Self::mutate_img_p2pool(state, helper, path, &read_args);
 
         // Print arguments & user settings to console
         crate::disk::print_dash(&format!(
@@ -338,7 +339,7 @@ impl Helper {
         let pub_api = Arc::clone(&helper.lock().unwrap().pub_api_p2pool);
         let gupax_p2pool_api = Arc::clone(&helper.lock().unwrap().gupax_p2pool_api);
         let path = path.to_path_buf();
-        let nodes = P2poolNodes::from_args(&args);
+        let nodes = P2poolNodes::from_args(&read_args);
         let node_to_start_with = nodes.hosts[0].node.clone();
         gupax_p2pool_api.lock().unwrap().nodes = nodes;
         // thread to check if the button for switching to local node if it is synced to restart p2pool.
@@ -385,10 +386,23 @@ impl Helper {
         let tail = &address[87..95];
         head.to_owned() + "..." + tail
     }
+    // [args], with the arguments of their --params-file, read from the directory of P2Pool [dir].
+    pub fn read_params_file(args: &[String], dir: &Path) -> Vec<String> {
+        if let [option, file] = args
+            && option == "--params-file"
+        {
+            match std::fs::read_to_string(dir.join(file)) {
+                Ok(params) => return params_file_args(&params),
+                Err(e) => warn!("P2Pool | Reading --params-file ... FAIL ... {e}"),
+            }
+        }
+        args.to_vec()
+    }
     pub fn mutate_img_p2pool(
         state: &P2pool,
         helper: &Arc<Mutex<Self>>,
         path: &Path,
+        args: &[String],
     ) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
         let mut api_path = path.to_path_buf();
         api_path.pop();
@@ -410,7 +424,7 @@ impl Helper {
             let lock = helper.lock().unwrap();
             let mut p2pool_image = lock.img_p2pool.lock().unwrap();
             let mut chain = P2poolChain::Main;
-            for arg in state.arguments.split_whitespace() {
+            for arg in args.iter().map(String::as_str) {
                 match arg {
                     "--mini" => chain = P2poolChain::Mini,
                     "--nano" => chain = P2poolChain::Nano,
@@ -443,6 +457,11 @@ impl Helper {
                 p2pool_image.chain = chain.to_string();
                 let arg = if arg == "localhost" { "127.0.0.1" } else { arg };
                 last = arg;
+            }
+            // The wallet is missing when Gupax could not read the --params-file: use the address
+            // set in Gupax.
+            if wallet.is_empty() {
+                wallet = state.address.as_str();
             }
             (chain, payout_sync::payout_address(wallet, subaddress))
         } else {
@@ -980,6 +999,59 @@ impl P2poolNodes {
     }
 }
 
+// Arguments of the --params-file [params] of P2Pool, read like P2Pool does: each line holds a
+// name and its values, separated by spaces, tabs or "=", and "#" starts a comment.
+fn params_file_args(params: &str) -> Vec<String> {
+    #[derive(Clone, Copy)]
+    enum Read {
+        BeforeName,
+        Name,
+        AfterName,
+        Value,
+        QuotedValue,
+        Escaped,
+        Comment,
+    }
+    let mut args: Vec<String> = Vec::new();
+    for line in params.lines() {
+        let mut read = Read::BeforeName;
+        for c in line.chars() {
+            read = match (read, c) {
+                (Read::Comment, _) => Read::Comment,
+                (Read::BeforeName | Read::Name | Read::AfterName | Read::Value, '#') => {
+                    Read::Comment
+                }
+                (Read::BeforeName, c) if c.is_ascii_alphabetic() => {
+                    args.push(format!("--{c}"));
+                    Read::Name
+                }
+                (Read::BeforeName, _) => Read::BeforeName,
+                (Read::Name, c) if !c.is_ascii_alphanumeric() && c != '-' => Read::AfterName,
+                (Read::AfterName, ' ' | '\t' | '=') => Read::AfterName,
+                (Read::AfterName, '"') => {
+                    args.push(String::new());
+                    Read::QuotedValue
+                }
+                (Read::AfterName, c) => {
+                    args.push(c.to_string());
+                    Read::Value
+                }
+                (Read::Value, ' ') | (Read::QuotedValue, '"') => Read::AfterName,
+                (Read::QuotedValue, '\\') => Read::Escaped,
+                (Read::Name | Read::Value | Read::QuotedValue | Read::Escaped, c) => {
+                    if let Some(arg) = args.last_mut() {
+                        arg.push(c);
+                    }
+                    match read {
+                        Read::Escaped => Read::QuotedValue,
+                        read => read,
+                    }
+                }
+            };
+        }
+    }
+    args
+}
 //---------------------------------------------------------------------------------------------------- [ImgP2pool]
 // A static "image" of data that P2Pool started with.
 // This is just a snapshot of the user data when they initially started P2Pool.

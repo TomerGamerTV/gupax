@@ -603,4 +603,43 @@ Uptime         = 0h 2m 4s
             }
         );
     }
+
+    #[test]
+    fn arguments_of_a_params_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("p2pool.conf"),
+            "# P2Pool parameters\n\
+             wallet = 4AAA\n\
+             host 192.168.1.5 # node on the LAN\n\
+             rpc-login \"user:p\\\"a ss\"\n\
+             rpc-ssl\n\
+             socks5=127.0.0.1:9050\n",
+        )
+        .unwrap();
+        let args = |arguments: &[&str]| {
+            arguments
+                .iter()
+                .map(|arg| arg.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            Helper::read_params_file(&args(&["--params-file", "p2pool.conf"]), dir.path()),
+            args(&[
+                "--wallet",
+                "4AAA",
+                "--host",
+                "192.168.1.5",
+                "--rpc-login",
+                "user:p\"a ss",
+                "--rpc-ssl",
+                "--socks5",
+                "127.0.0.1:9050"
+            ])
+        );
+        assert_eq!(
+            Helper::read_params_file(&args(&["--mini"]), dir.path()),
+            args(&["--mini"])
+        );
+    }
 }
