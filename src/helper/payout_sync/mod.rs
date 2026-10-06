@@ -24,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures::{StreamExt, TryStreamExt};
@@ -53,8 +53,8 @@ use crate::{
 mod observer;
 mod rpc;
 
-// Time without data after which a request fails, so a stalled sync ends.
-// The largest requests of a sync started answering within 0.2 s from a remote node.
+// Time without data after which a request fails, so a stalled sync ends and the automatic syncs
+// go on. The largest requests of a sync started answering within 0.2 s from a remote node.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 // (date, atomic_unit, height) of each payout found.
@@ -65,6 +65,11 @@ const FIRST_SCAN_BLOCKS: u64 = 30 * 24 * 60 * 60 / MONERO_BLOCK_TIME_IN_SECONDS;
 // Maximum headers and transactions returned by a restricted node per request.
 const NODE_MAX_HEADERS: u64 = 1000;
 const NODE_MAX_TRANSACTIONS: usize = 100;
+// Interval of the automatic syncs, the time for a block to become final.
+pub const SYNC_INTERVAL: Duration =
+    Duration::from_secs(P2POOL_PAYOUT_CHECK_DEPTH * MONERO_BLOCK_TIME_IN_SECONDS);
+// Interval of the automatic syncs after a failed one.
+pub const RETRY_INTERVAL: Duration = Duration::from_secs(10 * 60);
 // Bytes read from a private view key file, which holds a few lines.
 const VIEW_KEY_FILE_MAX: u64 = 64 * 1024;
 // Source of the view key scans in the scan file.
@@ -124,6 +129,7 @@ pub fn start(api: &mut GupaxP2poolApi, gupax_p2pool_api: &Arc<Mutex<GupaxP2poolA
     api.syncing = true;
     api.stop_sync = false;
     api.sync.clear();
+    api.next_sync = Some(Instant::now() + SYNC_INTERVAL);
     let gupax_p2pool_api = Arc::clone(gupax_p2pool_api);
     std::thread::spawn(move || sync(&gupax_p2pool_api, &sources));
     true
@@ -132,12 +138,18 @@ pub fn start(api: &mut GupaxP2poolApi, gupax_p2pool_api: &Arc<Mutex<GupaxP2poolA
 #[tokio::main]
 async fn sync(gupax_p2pool_api: &Arc<Mutex<GupaxP2poolApi>>, sources: &SyncSources) {
     let mut results = Vec::new();
-    tokio::select! {
-        () = run(gupax_p2pool_api, sources, &mut results) => (),
-        () = stopped(gupax_p2pool_api) => results.push("Stopped".to_string()),
-    }
+    let failed = tokio::select! {
+        failed = run(gupax_p2pool_api, sources, &mut results) => failed,
+        () = stopped(gupax_p2pool_api) => {
+            results.push("Stopped".to_string());
+            false
+        }
+    };
     let mut api = gupax_p2pool_api.lock().unwrap();
     api.sync = results.join(". ");
+    if failed {
+        api.next_sync = Some(Instant::now() + RETRY_INTERVAL);
+    }
     info!("Payout sync | {}", api.sync);
     api.syncing = false;
 }
@@ -148,17 +160,19 @@ async fn stopped(gupax_p2pool_api: &Arc<Mutex<GupaxP2poolApi>>) {
     }
 }
 
-// Syncs the payouts with [sources] and describes the result in [results].
+// Syncs the payouts with [sources], describes the result in [results] and returns whether it
+// failed.
 async fn run(
     gupax_p2pool_api: &Arc<Mutex<GupaxP2poolApi>>,
     sources: &SyncSources,
     results: &mut Vec<String>,
-) {
+) -> bool {
+    let mut failed = false;
     let (node, height) = match synced_node(&sources.nodes).await {
         Ok(synced) => synced,
         Err(e) => {
             results.push(format!("Node error: {e:#}"));
-            return;
+            return true;
         }
     };
     let found_blocks = read_found_blocks(&sources.found_blocks);
@@ -167,7 +181,10 @@ async fn run(
         None
     } else {
         view_pair(&sources.address, &sources.view_key)
-            .inspect_err(|e| results.push(format!("Sync error: {e:#}")))
+            .inspect_err(|e| {
+                results.push(format!("Sync error: {e:#}"));
+                failed = true;
+            })
             .ok()
     };
     let mut main = MainChain {
@@ -193,7 +210,10 @@ async fn run(
         .await;
         match scanned {
             Ok(scanned) => (main.hashes, main.payouts) = scanned,
-            Err(e) => results.push(format!("Sync error: {e:#}")),
+            Err(e) => {
+                results.push(format!("Sync error: {e:#}"));
+                failed = true;
+            }
         }
     } else if !sources.observer.is_empty() {
         let oldest_found = found_blocks.as_ref().ok().and_then(|found_blocks| {
@@ -206,7 +226,10 @@ async fn run(
                 results.push(format!("Missing payouts added: {added}"));
                 main.payouts = payouts;
             }
-            Err(e) => results.push(format!("Sync error: {e:#}")),
+            Err(e) => {
+                results.push(format!("Sync error: {e:#}"));
+                failed = true;
+            }
         }
     }
     let checked = async {
@@ -217,7 +240,9 @@ async fn run(
     .await;
     if let Err(e) = checked {
         results.push(format!("Orphan check error: {e:#}"));
+        failed = true;
     }
+    failed
 }
 
 // Last block of a chain of [height] blocks that can no longer be orphaned.
@@ -611,7 +636,6 @@ mod tests {
     use mockito::Matcher;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Instant;
 
     // Monero General Fund, which publishes its private view key.
     const ADDRESS: &str = "44AFFq5kSiGBoZ4NMDwYtN18obc8AemS33DBLWs3H7otXft3XjrpDtQGv7SqSsaBYBb98uNbr2VBBEt7f2wfn3RVGQBEP3A";
@@ -1500,6 +1524,73 @@ mod tests {
         assert_eq!(observer_url("https://192.168.1.10"), "https://192.168.1.10");
         // A pasted URL may end with a slash.
         assert_eq!(observer_url("p2pool.example/"), "https://p2pool.example");
+    }
+
+    #[test]
+    fn sync_sources_priority() {
+        let mut server = mockito::Server::new();
+        let general_fund =
+            include_str!("../../../tests/fixtures/payouts/observer_payouts_general_fund.json");
+        let observer = mock_observer(&mut server, ADDRESS, 200, general_fund).expect(1);
+        let resumed = server
+            .mock("GET", format!("/api/payouts/{ADDRESS}").as_str())
+            .match_query(Matcher::Exact(format!(
+                "limit=0&from_height={}",
+                LAST_FINAL + 1
+            )))
+            .with_body("[]")
+            .expect(1)
+            .create();
+        mock_observer_found_blocks(&mut server, OBSERVER_FOUND_BLOCKS);
+        mock_node(&mut server);
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = GupaxP2poolApi::temporary(dir.path());
+        api.address = ADDRESS.to_string();
+        api.found_blocks = write_found_blocks(
+            dir.path(),
+            json!([{"height": 3654400, "hash": HASH_ORPHANED}]),
+        );
+        let orphaned = (
+            "2026-04-17 10:59:38.0000".to_string(),
+            AtomicUnit::from_u64(1),
+            3654400,
+        );
+        let api = Arc::new(Mutex::new(api));
+        GupaxP2poolApi::merge_payouts(&api, &[orphaned]).unwrap();
+        api.lock().unwrap().nodes = nodes_at(&[server.host_with_port()]);
+        let sources = |view_key: &str, observers: Vec<Observer>| {
+            let mut api = api.lock().unwrap();
+            api.view_key = view_key.to_string();
+            api.observers = observers;
+            api.next_sync = None;
+            SyncSources::new(&api)
+        };
+
+        // The observer adds the missing payouts, then the orphaned one is removed.
+        sync(&api, &sources("", observer_at(&server.url())));
+        assert_eq!(
+            api.lock().unwrap().sync,
+            "Missing payouts added: 21. Orphaned payouts removed: 1"
+        );
+        assert_eq!(api.lock().unwrap().payout_u64, 21);
+        assert!(api.lock().unwrap().next_sync.is_none());
+
+        // The view key of another address.
+        let view_key = format!("01{}", "00".repeat(31));
+        sync(&api, &sources(&view_key, observer_at(&server.url())));
+        assert_eq!(
+            api.lock().unwrap().sync,
+            "Sync error: the private view key does not belong to the P2Pool address. Missing payouts added: 0. Orphaned payouts removed: 0"
+        );
+        // The failed sync is retried.
+        assert!(api.lock().unwrap().next_sync.is_some());
+        observer.assert();
+        resumed.assert();
+
+        // Without view key and observer, only the orphaned payouts are checked.
+        sync(&api, &sources("", Vec::new()));
+        assert_eq!(api.lock().unwrap().sync, "Orphaned payouts removed: 0");
+        assert!(api.lock().unwrap().next_sync.is_none());
     }
 
     #[test]

@@ -725,6 +725,7 @@ impl Helper {
             // Set timer
             let now = Instant::now();
             debug!("P2Pool Watchdog | ----------- Start of loop -----------");
+            let alive;
             {
                 gui_api.lock().unwrap().tick = (last_p2pool_request.elapsed().as_secs() % 60) as u8;
                 // Check if the process is secretly died without us knowing :)
@@ -799,6 +800,7 @@ impl Helper {
 
                 // check if state must be changed based on local and p2p API
                 pub_api_lock.update_state(&mut process_lock);
+                alive = process_lock.state == ProcessState::Alive;
 
                 debug!("P2Pool Watchdog | Attempting [network] & [pool] API file read");
                 if let (Ok(network_api), Ok(pool_api)) = (
@@ -844,12 +846,24 @@ impl Helper {
                     first_loop = false;
                 }
             } // end of scope to drop lock
+            // Sync the payouts while P2Pool is connected to a synced node.
+            if alive {
+                let mut api = gupax_p2pool_api.lock().unwrap();
+                if api.next_sync.is_none_or(|next| next <= Instant::now()) {
+                    payout_sync::start(&mut api, &gupax_p2pool_api);
+                }
+            }
             sleep_end_loop(now, ProcessName::P2pool).await;
         }
 
         // 5. If loop broke, we must be done here.
-        // A payout sync runs only while P2Pool runs.
-        gupax_p2pool_api.lock().unwrap().stop_sync = true;
+        // A payout sync runs only while P2Pool runs, and resumes once P2Pool starts again.
+        let mut api = gupax_p2pool_api.lock().unwrap();
+        if api.syncing {
+            api.next_sync = None;
+        }
+        api.stop_sync = true;
+        drop(api);
         info!("P2Pool Watchdog | Watchdog thread exiting... Goodbye!");
     }
     #[tokio::main]

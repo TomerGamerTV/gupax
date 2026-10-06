@@ -36,6 +36,7 @@ pub struct GupaxP2poolApi {
     pub sync: String,       // Result of the last payouts sync
     pub syncing: bool,
     pub stop_sync: bool,
+    pub next_sync: Option<std::time::Instant>, // Time of the next automatic payouts sync, at once if none
     pub found_blocks: PathBuf, // Blocks found by the pool, in the data API of the running P2Pool
     pub final_checked: HashSet<u64>, // Heights of the final blocks of the pool checked for orphans
     pub address: String,       // Address the running P2Pool pays
@@ -71,6 +72,7 @@ impl GupaxP2poolApi {
             sync: String::new(),
             syncing: false,
             stop_sync: false,
+            next_sync: None,
             found_blocks: PathBuf::new(),
             final_checked: HashSet::new(),
             address: String::new(),
