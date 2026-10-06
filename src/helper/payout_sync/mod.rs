@@ -65,8 +65,6 @@ const FIRST_SCAN_BLOCKS: u64 = 30 * 24 * 60 * 60 / MONERO_BLOCK_TIME_IN_SECONDS;
 // Maximum headers and transactions returned by a restricted node per request.
 const NODE_MAX_HEADERS: u64 = 1000;
 const NODE_MAX_TRANSACTIONS: usize = 100;
-// Connections to the node, leaving P2Pool one of the 3 a public node accepts per IP.
-const NODE_MAX_CONNECTIONS: usize = 2;
 // Bytes read from a private view key file, which holds a few lines.
 const VIEW_KEY_FILE_MAX: u64 = 64 * 1024;
 // Source of the view key scans in the scan file.
@@ -99,7 +97,9 @@ impl SyncSources {
             observer,
             chain: api.chain.clone(),
             address: api.address.clone(),
-            nodes: api.nodes.hosts.iter().map(NodeRpc::new).collect(),
+            nodes: (api.nodes.hosts.iter())
+                .map(|host| NodeRpc::new(host, &api.nodes.socks5))
+                .collect(),
             found_blocks: api.found_blocks.clone(),
         }
     }
@@ -321,7 +321,7 @@ async fn remove_orphaned_payouts(
             .filter(|block| !main.hashes.contains_key(&block.height)),
     )
     .map(|block| block_header(node, block.height))
-    .buffered(NODE_MAX_CONNECTIONS);
+    .buffered(node.connections());
     // (height, amount) of the payouts of main chain blocks.
     let mut main_chain: Vec<(u64, u64)> = main
         .payouts
@@ -479,7 +479,7 @@ async fn scan(
             let txs = coinbases(node, &headers).await?;
             anyhow::Ok((headers, txs))
         })
-        .try_buffered(NODE_MAX_CONNECTIONS);
+        .try_buffered(node.connections());
     let mut chunks = std::pin::pin!(chunks);
     let mut hashes = HashMap::new();
     let mut payouts = Payouts::new();

@@ -17,12 +17,15 @@
 
 //! RPC of the Monero node the payout sync reads.
 
-use std::time::Duration;
+use std::{net::IpAddr, sync::Mutex, time::Duration};
 
 use anyhow::Context;
 use log::*;
 use monero::{Transaction, consensus::deserialize};
-use reqwest::header::CONTENT_TYPE;
+use reqwest::{
+    StatusCode,
+    header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
+};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
@@ -32,35 +35,71 @@ use crate::{helper::p2pool::P2poolHost, miscs::client_with};
 
 // Time for a node to answer the first request, after which the sync tries the next one.
 const NODE_TIMEOUT: Duration = Duration::from_secs(15);
+// Time for a node reached through the SOCKS5 proxy, longer for Tor to build its circuit.
+const PROXY_NODE_TIMEOUT: Duration = Duration::from_secs(30);
+// Connections to the node, leaving P2Pool one of the 3 a public node accepts per IP.
+const NODE_MAX_CONNECTIONS: usize = 2;
+// Requests to a node with a login until one is accepted.
+const NODE_LOGIN_ATTEMPTS: usize = 3;
 
-// RPC of a node.
+// RPC of a node, reached like P2Pool does.
 pub(super) struct NodeRpc {
     url: String,
+    // user:password
+    login: String,
+    // SOCKS5 proxy, empty for a direct connection.
+    proxy: String,
     timeout: Duration,
+    // Login challenge of the node, valid on the connection that got it.
+    challenge: Mutex<Option<http_auth::PasswordClient>>,
 }
 
 impl NodeRpc {
-    pub(super) fn new(host: &P2poolHost) -> Self {
+    pub(super) fn new(host: &P2poolHost, socks5: &str) -> Self {
         let node = &host.node;
+        let scheme = if host.rpc_ssl { "https" } else { "http" };
         let ip = if node.ip.contains(':') {
             format!("[{}]", node.ip)
         } else {
             node.ip.clone()
         };
+        // P2Pool connects to the private addresses directly.
+        let private = node.ip.parse().is_ok_and(|ip| match ip {
+            IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+            IpAddr::V6(ip) => {
+                ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+            }
+        });
+        let proxy = if private {
+            String::new()
+        } else {
+            socks5.to_string()
+        };
+        let timeout = if proxy.is_empty() {
+            NODE_TIMEOUT
+        } else {
+            PROXY_NODE_TIMEOUT
+        };
         Self {
-            url: format!("http://{ip}:{}", node.rpc),
-            timeout: NODE_TIMEOUT,
+            url: format!("{scheme}://{ip}:{}", node.rpc),
+            login: host.rpc_login.clone(),
+            proxy,
+            timeout,
+            challenge: Mutex::new(None),
         }
     }
 
-    // Client of the RPC.
+    // Client of the RPC, accepting any certificate since a node serves a self-signed one.
     pub(super) fn client(&self) -> anyhow::Result<NodeClient<'_>> {
-        let client = reqwest::Client::builder()
+        let mut client = reqwest::Client::builder()
             .read_timeout(READ_TIMEOUT)
-            .build()?;
+            .tls_danger_accept_invalid_certs(true);
+        if !self.proxy.is_empty() {
+            client = client.proxy(reqwest::Proxy::all(format!("socks5h://{}", self.proxy))?);
+        }
         Ok(NodeClient {
             rpc: self,
-            http: client_with(client),
+            http: client_with(client.build()?),
         })
     }
 }
@@ -68,6 +107,17 @@ impl NodeRpc {
 pub(super) struct NodeClient<'a> {
     rpc: &'a NodeRpc,
     http: ClientWithMiddleware,
+}
+
+impl NodeClient<'_> {
+    // Concurrent requests to the node: a node with a login gets one connection, for its challenge.
+    pub(super) fn connections(&self) -> usize {
+        if self.rpc.login.is_empty() {
+            NODE_MAX_CONNECTIONS
+        } else {
+            1
+        }
+    }
 }
 
 // Result of [get_block_header_by_height], with the fields the sync uses.
@@ -233,15 +283,39 @@ async fn rpc<T: DeserializeOwned>(
         .ok_or_else(|| anyhow::anyhow!("node error: no result"))
 }
 
-// Posts the JSON [body] to [path] of [node].
+// Posts the JSON [body] to [path] of [node], with the answer to its login challenge.
 async fn post(node: &NodeClient<'_>, path: &str, body: &str) -> anyhow::Result<reqwest::Response> {
-    node.http
-        .post(format!("{}{path}", node.rpc.url))
-        .header(CONTENT_TYPE, "application/json")
-        .body(body.to_string())
-        .send()
-        .await
-        .context(NoAnswer)
+    let NodeClient { rpc, http } = node;
+    let url = format!("{}{path}", rpc.url);
+    let (username, password) = rpc.login.split_once(':').unwrap_or((&rpc.login, ""));
+    let params = http_auth::PasswordParams {
+        username,
+        password,
+        uri: path,
+        method: "POST",
+        body: Some(body.as_bytes()),
+    };
+    for _ in 0..NODE_LOGIN_ATTEMPTS {
+        let mut request = http
+            .post(&url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        if let Some(challenge) = rpc.challenge.lock().unwrap().as_mut() {
+            let answer = challenge.respond(&params).map_err(anyhow::Error::msg)?;
+            request = request.header(AUTHORIZATION, answer);
+        }
+        let response = request.send().await.context(NoAnswer)?;
+        if rpc.login.is_empty() || response.status() != StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+        let challenge = response.headers().get_all(WWW_AUTHENTICATE);
+        let challenge =
+            http_auth::PasswordClient::try_from(challenge).map_err(anyhow::Error::msg)?;
+        *rpc.challenge.lock().unwrap() = Some(challenge);
+        // The connection is free for the answer once the response is read.
+        response.bytes().await.context(NoAnswer)?;
+    }
+    anyhow::bail!("the node rejected the RPC login")
 }
 
 async fn json<T: DeserializeOwned>(response: reqwest::Response) -> anyhow::Result<T> {
@@ -279,12 +353,18 @@ fn ensure_ok(status: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helper::p2pool::P2poolNodes;
+    use mockito::Matcher;
     use std::time::Instant;
 
+    // RPC at [url] with the default options of P2Pool.
     fn rpc_at(url: String) -> NodeRpc {
         NodeRpc {
             url,
+            login: String::new(),
+            proxy: String::new(),
             timeout: NODE_TIMEOUT,
+            challenge: Mutex::new(None),
         }
     }
 
@@ -332,5 +412,99 @@ mod tests {
             .unwrap();
         assert_eq!(node.rpc.url, server.url());
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn rpc_of_the_node() {
+        let args = "--socks5 127.0.0.1:9050 --host xyz.onion --rpc-login user:pass --rpc-ssl --host 192.168.1.5 --host ::1";
+        let nodes = P2poolNodes::from_args(&args.split(' ').map(String::from).collect::<Vec<_>>());
+        let rpc: Vec<_> = nodes
+            .hosts
+            .iter()
+            .map(|host| {
+                let node = NodeRpc::new(host, &nodes.socks5);
+                (node.url, node.login, node.proxy)
+            })
+            .collect();
+        let strings = |url: &str, login: &str, proxy: &str| {
+            (url.to_string(), login.to_string(), proxy.to_string())
+        };
+        assert_eq!(
+            rpc,
+            [
+                strings("https://xyz.onion:18081", "user:pass", "127.0.0.1:9050"),
+                strings("http://192.168.1.5:18081", "", ""),
+                strings("http://[::1]:18081", "", ""),
+            ]
+        );
+        let timeouts: Vec<_> = (nodes.hosts.iter())
+            .map(|host| NodeRpc::new(host, &nodes.socks5).timeout)
+            .collect();
+        assert_eq!(timeouts, [PROXY_NODE_TIMEOUT, NODE_TIMEOUT, NODE_TIMEOUT]);
+    }
+
+    // Challenges of monerod started with --rpc-login.
+    fn mock_login_challenge(server: &mut mockito::ServerGuard) -> mockito::Mock {
+        let mut challenge = server.mock("POST", "/json_rpc").with_status(401);
+        for algorithm in ["SHA-256", "SHA-256-sess", "MD5", "MD5-sess"] {
+            let value = format!(
+                r#"Digest qop="auth",algorithm={algorithm},realm="monero-rpc",nonce="5ofHiw6hDiYxFtTBTnqXyQ==",stale=false"#
+            );
+            challenge = challenge.with_header("www-authenticate", &value);
+        }
+        challenge
+    }
+
+    #[test]
+    fn answers_the_login_challenge_of_the_node() {
+        let mut server = mockito::Server::new();
+        let challenge = mock_login_challenge(&mut server)
+            .match_header("authorization", Matcher::Missing)
+            .expect(1)
+            .create();
+        let answer = r#"^Digest username="user", realm="monero-rpc", uri="/json_rpc", nonce="5ofHiw6hDiYxFtTBTnqXyQ==", algorithm=SHA-256, nc=0000000[12], cnonce="[^"]+", qop=auth, response="[0-9a-f]{64}"$"#;
+        let answers = server
+            .mock("POST", "/json_rpc")
+            .match_header("authorization", Matcher::Regex(answer.to_string()))
+            .with_body(include_str!(
+                "../../../tests/fixtures/payouts/node_info.json"
+            ))
+            .expect(2)
+            .create();
+        let mut node = rpc_at(server.url());
+        node.login = "user:pass".to_string();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let client = node.client().unwrap();
+
+        // The next request answers the same challenge.
+        for _ in 0..2 {
+            let info = runtime
+                .block_on(rpc::<Info>(&client, "get_info", json!({})))
+                .unwrap();
+            assert!(info.synchronized);
+        }
+        challenge.assert();
+        answers.assert();
+    }
+
+    #[test]
+    fn stops_when_the_node_rejects_the_login() {
+        let mut server = mockito::Server::new();
+        let challenge = mock_login_challenge(&mut server)
+            .expect(NODE_LOGIN_ATTEMPTS)
+            .create();
+        let mut node = rpc_at(server.url());
+        node.login = "user:wrong".to_string();
+
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(rpc::<serde_json::Value>(
+                &node.client().unwrap(),
+                "get_info",
+                json!({}),
+            ))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "the node rejected the RPC login");
+        challenge.assert();
     }
 }

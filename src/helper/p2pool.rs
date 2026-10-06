@@ -20,7 +20,6 @@ use super::Process;
 use crate::app::BackupNodes;
 use crate::app::panels::middle::common::list_poolnode::PoolNode;
 use crate::app::submenu_enum::SubmenuP2pool;
-use crate::components::node::RemoteNode;
 use crate::disk::node::Node as NodeString;
 use crate::disk::state::Node;
 use crate::disk::state::P2pool;
@@ -339,12 +338,8 @@ impl Helper {
         let pub_api = Arc::clone(&helper.lock().unwrap().pub_api_p2pool);
         let gupax_p2pool_api = Arc::clone(&helper.lock().unwrap().gupax_p2pool_api);
         let path = path.to_path_buf();
-        let node_to_start_with = state
-            .selected_remote_node
-            .as_ref()
-            .expect("P2Pool should always be started with a node set")
-            .clone();
         let nodes = P2poolNodes::from_args(&args);
+        let node_to_start_with = nodes.hosts[0].node.clone();
         gupax_p2pool_api.lock().unwrap().nodes = nodes;
         // thread to check if the button for switching to local node if it is synced to restart p2pool.
         // starting the thread even if the option is disabled allows to apply the change immediately in case it is enabled again without asking the user to restart p2pool.
@@ -635,7 +630,7 @@ impl Helper {
         api_path_pool: std::path::PathBuf,
         api_path_p2p: std::path::PathBuf,
         gupax_p2pool_api: Arc<Mutex<GupaxP2poolApi>>,
-        node: RemoteNode,
+        node: NodeString,
     ) {
         // 1a. Create PTY
         let (stdin_reader, stdin_writer) = std::io::pipe().unwrap();
@@ -718,11 +713,7 @@ impl Helper {
 
         // Set the node used so that Stats can fetch it.
         // It will be updated with the output console of P2Pool while the process is still running
-        gui_api.lock().unwrap().current_node = Some(NodeString {
-            ip: node.ip.to_string(),
-            rpc: node.rpc.to_string(),
-            zmq: node.zmq.to_string(),
-        });
+        gui_api.lock().unwrap().current_node = Some(node);
 
         // 4. Loop as watchdog
         let mut first_loop = true;
@@ -914,11 +905,14 @@ impl Helper {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct P2poolNodes {
     pub hosts: Vec<P2poolHost>, // In the order P2Pool connects to them
+    pub socks5: String,         // Proxy of P2Pool
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct P2poolHost {
     pub node: NodeString,
+    pub rpc_login: String, // user:password of the RPC
+    pub rpc_ssl: bool,     // Does the RPC use TLS?
 }
 
 impl Default for P2poolHost {
@@ -930,6 +924,8 @@ impl Default for P2poolHost {
                 rpc: NODE_RPC_PORT_DEFAULT.to_string(),
                 zmq: NODE_ZMQ_PORT_DEFAULT.to_string(),
             },
+            rpc_login: String::new(),
+            rpc_ssl: false,
         }
     }
 }
@@ -948,11 +944,20 @@ impl P2poolNodes {
                         ip,
                         ..host.clone().unwrap_or_default().node
                     };
-                    let new = P2poolHost { node };
+                    let new = P2poolHost {
+                        node,
+                        ..Default::default()
+                    };
                     nodes.hosts.extend(host.replace(new));
                 }
                 ("--rpc-port", Some(port)) => host.get_or_insert_default().node.rpc = port,
                 ("--zmq-port", Some(port)) => host.get_or_insert_default().node.zmq = port,
+                ("--rpc-login", Some(login)) => host.get_or_insert_default().rpc_login = login,
+                ("--rpc-ssl", _) => host.get_or_insert_default().rpc_ssl = true,
+                ("--rpc-ssl-fingerprint", Some(_)) => {
+                    host.get_or_insert_default();
+                }
+                ("--socks5", Some(proxy)) => nodes.socks5 = proxy,
                 _ => (),
             }
         }
