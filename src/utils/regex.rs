@@ -98,8 +98,8 @@ impl P2poolRegex {
             date: Regex::new("[0-9]+-[0-9]+-[0-9]+ [0-9]+:[0-9]+:[0-9]+.[0-9]+").unwrap(),
             payout: Regex::new("payout of [0-9].[0-9]+ XMR").unwrap(), // Assumes 12 digits after the dot.
             payout_float: Regex::new("[0-9].[0-9]{12}").unwrap(), // Assumes 12 digits after the dot.
-            block: Regex::new("block [0-9]{7}").unwrap(), // Monero blocks will be 7 digits for... the next 10,379 years
-            block_int: Regex::new("[0-9]{7}").unwrap(),
+            block: Regex::new("block [0-9]+").unwrap(),
+            block_int: Regex::new("[0-9]+").unwrap(),
         }
     }
 }
@@ -368,8 +368,13 @@ mod test {
             r.date.find(text).unwrap().as_str(),
             "2022-11-11 11:11:11.1111"
         );
-        assert_eq!(r.block.find(text).unwrap().as_str(), "block 1111111");
-        assert_eq!(r.block_int.find(text).unwrap().as_str(), "1111111");
+        let block = r.block.find(text).unwrap().as_str();
+        assert_eq!(block, "block 1111111");
+        assert_eq!(r.block_int.find(block).unwrap().as_str(), "1111111");
+        let text = "NOTICE  2050-11-11 11:11:11.1111 P2Pool You received a payout of 0.111111111111 XMR in block 10000001";
+        let block = r.block.find(text).unwrap().as_str();
+        assert_eq!(block, "block 10000001");
+        assert_eq!(r.block_int.find(block).unwrap().as_str(), "10000001");
     }
 
     #[test]
