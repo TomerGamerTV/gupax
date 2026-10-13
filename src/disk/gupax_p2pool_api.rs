@@ -44,6 +44,7 @@ pub struct GupaxP2poolApi {
     pub nodes: P2poolNodes,    // Monero nodes of the running P2Pool
     pub observers: Vec<Observer>, // Observers used to sync the payouts
     pub view_key: String,      // Private view key used to sync the payouts, kept in memory only
+    pub scan_from: String,     // Date the next view key scan starts from
     announced: HashMap<u64, u64>, // Amount of the payout P2Pool announced at each height
     pending: Vec<String>,      // Payout lines of [log] missing from its file
     replaced: Vec<(u64, u64)>, // (height, amount) of the replaced payouts left in the file of [log]
@@ -80,6 +81,7 @@ impl GupaxP2poolApi {
             nodes: P2poolNodes::default(),
             observers: Vec::new(),
             view_key: String::new(),
+            scan_from: String::new(),
             announced: HashMap::new(),
             pending: Vec::new(),
             replaced: Vec::new(),

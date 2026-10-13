@@ -21,6 +21,8 @@ use egui::{
     Button, Label, RichText, ScrollArea, Separator, Slider, TextEdit, TextStyle, ViewportCommand,
     text::{CCursor, CCursorRange},
 };
+use egui_extras::DatePickerButton;
+use jiff::{Timestamp, civil::Date, tz::TimeZone};
 use readable::num::Unsigned;
 use strum::{EnumCount, IntoEnumIterator};
 
@@ -244,6 +246,28 @@ impl Status {
                     }
                 });
                 ui.horizontal(|ui| {
+                    ui.add_sized([0.0, height], Label::new("Scan from"));
+                    ui.add(
+                        TextEdit::singleline(&mut api.scan_from)
+                            .hint_text("YYYY-MM-DD")
+                            .desired_width(size_text * 7.0),
+                    )
+                    .on_hover_text(STATUS_SUBMENU_SCAN_FROM);
+                    let today = Timestamp::now().to_zoned(TimeZone::UTC).date();
+                    let mut date = scan_from_date(&api.scan_from, today);
+                    // The button text is the calendar icon alone, the text field shows the date.
+                    let calendar = DatePickerButton::new(&mut date)
+                        .show_icon(false)
+                        .format("📅");
+                    if ui
+                        .add(calendar)
+                        .on_hover_text(STATUS_SUBMENU_PICK_SCAN_FROM)
+                        .changed()
+                    {
+                        api.scan_from = date.to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
                     let enabled = !api.syncing && p2pool_alive;
                     let disabled_reason = if api.syncing {
                         STATUS_SUBMENU_REFRESH_SYNCING
@@ -464,5 +488,26 @@ impl Status {
                 drop(api);
             });
         });
+    }
+}
+
+// Date of the scan date [text] that the date picker opens on, [today] if [text] holds none.
+fn scan_from_date(text: &str, today: Date) -> Date {
+    text.trim().parse().unwrap_or(today)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn date_picker_opens_on_the_scan_date() {
+        let today = Date::constant(2026, 10, 22);
+        let date = Date::constant(2026, 4, 17);
+        assert_eq!(scan_from_date(" 2026-04-17 ", today), date);
+        assert_eq!(scan_from_date("", today), today);
+        assert_eq!(scan_from_date("17/04/2026", today), today);
+        // The picker writes the date as the scan reads it.
+        assert_eq!(date.to_string(), "2026-04-17");
     }
 }

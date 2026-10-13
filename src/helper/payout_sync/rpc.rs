@@ -140,6 +140,7 @@ pub(super) struct BlockHeader {
     pub(super) height: u64,
     pub(super) hash: String,
     miner_tx_hash: String,
+    pub(super) timestamp: i64,
 }
 
 // Header of the main chain block at [height].

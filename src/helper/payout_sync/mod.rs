@@ -27,6 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
 use futures::{StreamExt, TryStreamExt};
 use log::*;
 use monero::{
@@ -78,6 +79,7 @@ const VIEW_KEY_SOURCE: &str = "view-key";
 // The missing payouts are found with the view key or the observer.
 struct SyncSources {
     view_key: String,
+    scan_from: String,
     observer: String,
     chain: P2poolChain,
     address: String,
@@ -99,6 +101,7 @@ impl SyncSources {
             });
         Self {
             view_key: api.view_key.trim().to_string(),
+            scan_from: api.scan_from.trim().to_string(),
             observer,
             chain: api.chain.clone(),
             address: api.address.clone(),
@@ -468,9 +471,9 @@ fn read_found_blocks(path: &Path) -> anyhow::Result<Vec<FoundBlock>> {
 }
 
 //---------------------------------------------------------------------------------------------------- Private view key
-// Scans the final blocks since the last scan of the address of [sources], and adds the payouts to
-// [pair] found after each range of blocks. Returns the hash of the blocks at the heights [found]
-// with the payouts found.
+// Scans the final blocks since the last scan of the address of [sources], or since its date if
+// set, and adds the payouts to [pair] found after each range of blocks. Returns the hash of the
+// blocks at the heights [found] with the payouts found.
 async fn scan(
     gupax_p2pool_api: &Arc<Mutex<GupaxP2poolApi>>,
     node: &NodeClient<'_>,
@@ -484,8 +487,22 @@ async fn scan(
     let tip = height.saturating_sub(1);
     let path_scan = gupax_p2pool_api.lock().unwrap().path_scan.clone();
     let position = GupaxP2poolApi::read_scan(&path_scan, VIEW_KEY_SOURCE, address);
-    let start = position.unwrap_or(tip.saturating_sub(FIRST_SCAN_BLOCKS));
-    let mut saved = position.is_some();
+    let start = if sources.scan_from.is_empty() {
+        position.unwrap_or(tip.saturating_sub(FIRST_SCAN_BLOCKS))
+    } else {
+        let date = &sources.scan_from;
+        gupax_p2pool_api.lock().unwrap().sync = format!("Looking for the first block of {date}");
+        let start = first_block_since(node, height, day_start(date)?).await?;
+        GupaxP2poolApi::write_scan(&path_scan, start, VIEW_KEY_SOURCE, address, false)
+            .map_err(write_error)?;
+        // The next scans resume from the block of the date.
+        let mut api = gupax_p2pool_api.lock().unwrap();
+        if api.scan_from.trim() == date {
+            api.scan_from.clear();
+        }
+        start
+    };
+    let mut saved = position.is_some() || !sources.scan_from.is_empty();
     let end = last_final_block(height);
     // The headers of a range download with the coinbases of the previous one.
     let chunks = futures::stream::iter((start..=end).step_by(NODE_MAX_HEADERS as usize))
@@ -582,6 +599,24 @@ pub fn read_view_key(path: &Path) -> Result<String, String> {
         .ok_or_else(|| "View key file: no key found".to_string())
 }
 
+// First block of a chain of [height] blocks mined at or after [timestamp].
+async fn first_block_since(
+    node: &NodeClient<'_>,
+    height: u64,
+    timestamp: i64,
+) -> anyhow::Result<u64> {
+    let (mut low, mut high) = (0, height);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if block_header(node, middle).await?.timestamp < timestamp {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    Ok(low)
+}
+
 // Amount paid to [pair] by the coinbase transaction [tx], if it is the one of a P2Pool block,
 // which holds a merge mining tag.
 fn coinbase_payout(tx: &Transaction, pair: &ViewPair) -> u64 {
@@ -621,6 +656,13 @@ fn utc_date(timestamp: i64) -> String {
         || "????-??-?? ??:??:??.????".to_string(),
         |date| date.format("%Y-%m-%d %H:%M:%S.0000").to_string(),
     )
+}
+
+// Timestamp of the start of the UTC day [date], written YYYY-MM-DD.
+fn day_start(date: &str) -> anyhow::Result<i64> {
+    let date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .with_context(|| format!("the start date {date} is not written YYYY-MM-DD"))?;
+    Ok(date.and_time(chrono::NaiveTime::MIN).and_utc().timestamp())
 }
 
 //---------------------------------------------------------------------------------------------------- Tests
@@ -1332,6 +1374,77 @@ mod tests {
         runtime.block_on(scanned).unwrap();
         assert_eq!(results, ["Missing payouts added: 0"]);
         headers.assert();
+    }
+
+    #[test]
+    fn view_key_scan_from_a_date() {
+        let mut server = mockito::Server::new();
+        // Blocks 2 minutes apart, the block 3,654,400 being the first one of 2026-04-17.
+        let day = day_start("2026-04-17").unwrap();
+        server
+            .mock("POST", "/json_rpc")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "get_block_header_by_height"}),
+            ))
+            .with_body_from_request(move |request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                let height = body["params"]["height"].as_i64().unwrap();
+                let header = json!({
+                    "height": height,
+                    "hash": "",
+                    "miner_tx_hash": "",
+                    "timestamp": day + (height - 3654400) * 120,
+                });
+                json!({"id": "0", "result": {"block_header": header, "status": "OK"}})
+                    .to_string()
+                    .into()
+            })
+            .create();
+        let headers = mock_rpc(
+            &mut server,
+            "get_block_headers_range",
+            json!({"start_height": 3654400, "end_height": 3654402}),
+            include_str!("../../../tests/fixtures/payouts/node_block_headers_3654400_3654402.json"),
+        )
+        .expect(1);
+        server
+            .mock("POST", "/get_transactions")
+            .with_body(include_str!(
+                "../../../tests/fixtures/payouts/node_coinbases_3654400_3654402.json"
+            ))
+            .create();
+        let dir = tempfile::tempdir().unwrap();
+        let mut api = GupaxP2poolApi::temporary(dir.path());
+        api.address = ADDRESS.to_string();
+        let path_scan = api.path_scan.clone();
+        // The blocks were scanned before the date was set.
+        GupaxP2poolApi::write_scan(&path_scan, 3654403, VIEW_KEY_SOURCE, ADDRESS, false).unwrap();
+        api.scan_from = "2026-04-17".to_string();
+        api.nodes = nodes_at(&[server.host_with_port()]);
+        let sources = SyncSources::new(&api);
+        let api = Arc::new(Mutex::new(api));
+        let pair = view_pair(ADDRESS, VIEW_KEY).unwrap();
+
+        let node = sources.nodes[0].client().unwrap();
+        let found = HashSet::new();
+
+        // A node at height 3,654,463, so the block 3,654,402 is final.
+        let mut results = Vec::new();
+        let scanned = scan(&api, &node, &sources, 3654463, &pair, &found, &mut results);
+        let (_, payouts) = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(scanned)
+            .unwrap();
+        assert_eq!(payouts, [payout_3654401()]);
+        headers.assert();
+        // The next scans resume from the last block scanned.
+        assert_eq!(api.lock().unwrap().scan_from, "");
+        assert_eq!(
+            GupaxP2poolApi::read_scan(&path_scan, VIEW_KEY_SOURCE, ADDRESS),
+            Some(3654403)
+        );
+        assert!(day_start("17/04/2026").is_err());
     }
 
     #[test]
