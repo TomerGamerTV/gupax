@@ -239,17 +239,8 @@ impl PayoutOrd {
 
     // Takes in input of ONLY P2Pool payout logs and converts it into a usable [PayoutOrd]
     // It expects formatted log lines like this: "2022-04-11 00:20:17.2571 | 0.001371623621 XMR | Block 2,562,511"
-    // For efficiency reasons, I'd like to know the byte size
-    // we should allocate for the vector so we aren't adding every loop.
-    // Given a log [str], the equation for how many bytes the final vec will be is:
-    // (BYTES_OF_DATE + BYTES OF XMR + BYTES OF BLOCK) + (SPACES, PIPES, MISC WORDS) * amount_of_lines
-    // The first three are more or less constants (monero block 10m is in 10,379 years...): [23, 14, 7] (sum: 44)
-    // Spaces, pipes, commas and words (XMR, Block): [19]
-    // Add 7 more bytes for wrapper type overhead and it's an even [70] bytes per line.
     pub fn update_from_payout_log(&mut self, log: &str) {
-        let amount_of_lines = log.lines().count();
-        let mut vec: Vec<(String, AtomicUnit, HumanNumber)> =
-            Vec::with_capacity(70 * amount_of_lines);
+        let mut vec = Vec::with_capacity(log.lines().count());
         for line in log.lines() {
             debug!("PayoutOrd | Parsing line: [{line}]");
             vec.push(Self::parse_formatted_payout_line(line));
