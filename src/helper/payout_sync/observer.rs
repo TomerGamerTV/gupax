@@ -21,9 +21,9 @@ use std::net::IpAddr;
 
 use anyhow::Context;
 use reqwest_middleware::ClientWithMiddleware;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 
-use super::{Payouts, utc_date};
+use super::{Payouts, client, utc_date};
 use crate::xmr::AtomicUnit;
 
 // Payout returned by the API of a P2Pool observer, with the fields the sync uses.
@@ -43,6 +43,16 @@ struct ObserverFoundBlock {
 #[derive(Deserialize)]
 struct ObserverMainBlock {
     height: u64,
+}
+
+// Output of the coinbase transaction of a block found by the pool returned by the API of a P2Pool
+// observer, with the fields the sync uses.
+#[derive(Deserialize)]
+struct ObserverCoinbaseOutput {
+    miner_address: String,
+    // Subaddress the output pays, if the miner has one.
+    miner_payout_address: Option<String>,
+    value: u64,
 }
 
 // This matches an error returned by the API of a P2Pool observer.
@@ -93,15 +103,9 @@ pub(super) async fn observer_payouts(
 ) -> anyhow::Result<Option<Payouts>> {
     let from = from_height.map_or_else(String::new, |height| format!("&from_height={height}"));
     let url = format!("{observer}/api/payouts/{address}?limit=0{from}");
-    let response = client.get(url).send().await?;
-    if let Some(e) = response.error_for_status_ref().err() {
-        let error = response.json::<ObserverError>().await;
-        if error.is_ok_and(|error| error.error == "not_found") {
-            return Ok(None);
-        }
-        return Err(e.into());
-    }
-    let payouts = response.json::<Vec<ObserverPayout>>().await?;
+    let Some(payouts) = observer_get::<Vec<ObserverPayout>>(client, url).await? else {
+        return Ok(None);
+    };
     Ok(Some(
         payouts
             .into_iter()
@@ -115,4 +119,45 @@ pub(super) async fn observer_payouts(
             })
             .collect(),
     ))
+}
+
+// Payout to [address] of the block [hash] found by the pool, which [observer] computes from the
+// shares of the pool, or none if [observer] does not know the block.
+pub(super) async fn observer_block_payout(
+    observer: &str,
+    hash: &str,
+    address: &str,
+) -> anyhow::Result<Option<u64>> {
+    let url = format!("{observer}/api/block_by_id/{hash}/coinbase");
+    let outputs = observer_get::<Vec<ObserverCoinbaseOutput>>(&client()?, url).await?;
+    Ok(outputs.map(|outputs| {
+        outputs
+            .iter()
+            .filter(|output| {
+                output
+                    .miner_payout_address
+                    .as_deref()
+                    .unwrap_or(&output.miner_address)
+                    == address
+            })
+            .map(|output| output.value)
+            .sum()
+    }))
+}
+
+// Response of the API of a P2Pool observer at [url], or none if the observer does not know what
+// [url] names.
+async fn observer_get<T: DeserializeOwned>(
+    client: &ClientWithMiddleware,
+    url: String,
+) -> anyhow::Result<Option<T>> {
+    let response = client.get(url).send().await?;
+    if let Some(e) = response.error_for_status_ref().err() {
+        let error = response.json::<ObserverError>().await;
+        if error.is_ok_and(|error| error.error == "not_found") {
+            return Ok(None);
+        }
+        return Err(e.into());
+    }
+    Ok(Some(response.json().await?))
 }

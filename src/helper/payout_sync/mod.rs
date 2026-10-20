@@ -37,7 +37,7 @@ use monero::{
 use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 
-use self::observer::{observer_last_found, observer_payouts, observer_url};
+use self::observer::{observer_block_payout, observer_last_found, observer_payouts, observer_url};
 use self::rpc::{
     BlockHeader, NoAnswer, NodeClient, NodeError, NodeRpc, block_coinbase, block_header,
     block_headers, coinbases, synced_node, transaction,
@@ -238,7 +238,16 @@ async fn run(
     let checked = async {
         let found_blocks = found_blocks?;
         let pair = pair.as_ref();
-        remove_orphaned_payouts(gupax_p2pool_api, &node, &found_blocks, pair, &main, results).await
+        remove_orphaned_payouts(
+            gupax_p2pool_api,
+            &node,
+            sources,
+            &found_blocks,
+            pair,
+            &main,
+            results,
+        )
+        .await
     }
     .await;
     if let Err(e) = checked {
@@ -323,6 +332,7 @@ struct MainChain {
 async fn remove_orphaned_payouts(
     gupax_p2pool_api: &Arc<Mutex<GupaxP2poolApi>>,
     node: &NodeClient<'_>,
+    sources: &SyncSources,
     found_blocks: &[FoundBlock],
     pair: Option<&ViewPair>,
     main: &MainChain,
@@ -417,18 +427,11 @@ async fn remove_orphaned_payouts(
             heights.push(block.height);
             continue;
         }
-        // Another block of the pool replaced the orphaned one: the payout of the orphaned block is
-        // told apart with the view key, from the orphaned block the node keeps.
-        let Some(pair) = pair else {
-            continue;
-        };
-        match block_coinbase(node, &block.hash).await {
-            Ok(tx) => match coinbase_payout(&tx, pair) {
-                0 => (),
-                amount => orphaned_payouts.push((block.height, amount)),
-            },
-            // The node no longer keeps the orphaned block.
-            Err(e) if e.is::<NodeError>() => (),
+        // Another block of the pool replaced the orphaned one: only the payout of the orphaned
+        // block is removed.
+        match orphaned_payout(node, sources, pair, &block.hash).await {
+            Ok(None | Some(0)) => (),
+            Ok(Some(amount)) => orphaned_payouts.push((block.height, amount)),
             Err(e) => {
                 unchecked.insert(block.height);
                 error.get_or_insert(e);
@@ -446,6 +449,29 @@ async fn remove_orphaned_payouts(
         .extend(checked.filter(|height| !unchecked.contains(height)));
     results.push(format!("Orphaned payouts removed: {removed}"));
     error.map_or(Ok(()), Err)
+}
+
+// Payout to the address of [sources] in the orphaned block [hash], found with [pair] in the block
+// the node keeps, else computed by the observer of [sources] if set, or none if neither knows the
+// block.
+async fn orphaned_payout(
+    node: &NodeClient<'_>,
+    sources: &SyncSources,
+    pair: Option<&ViewPair>,
+    hash: &str,
+) -> anyhow::Result<Option<u64>> {
+    if let Some(pair) = pair {
+        match block_coinbase(node, hash).await {
+            Ok(tx) => return Ok(Some(coinbase_payout(&tx, pair))),
+            // The node no longer keeps the orphaned block.
+            Err(e) if e.is::<NodeError>() => (),
+            Err(e) => return Err(e),
+        }
+    }
+    if sources.observer.is_empty() {
+        return Ok(None);
+    }
+    observer_block_payout(&sources.observer, hash, &sources.address).await
 }
 
 // Blocks of [found_blocks] final up to the block [last] that the orphan check did not check yet.
@@ -725,6 +751,22 @@ mod tests {
             .create()
     }
 
+    fn mock_observer_coinbase(
+        server: &mut mockito::ServerGuard,
+        status: usize,
+        body: &str,
+    ) -> mockito::Mock {
+        server
+            .mock(
+                "GET",
+                format!("/api/block_by_id/{HASH_ORPHANED}/coinbase").as_str(),
+            )
+            .match_header("user-agent", APP_USER_AGENT)
+            .with_status(status)
+            .with_body(body)
+            .create()
+    }
+
     fn mock_rpc(
         server: &mut mockito::ServerGuard,
         method: &str,
@@ -809,6 +851,7 @@ mod tests {
             .block_on(remove_orphaned_payouts(
                 api,
                 &sources.nodes[0].client().unwrap(),
+                &sources,
                 &read_found_blocks(found_blocks).unwrap(),
                 pair,
                 &main,
@@ -1018,6 +1061,7 @@ mod tests {
             .block_on(remove_orphaned_payouts(
                 &api,
                 &node.client().unwrap(),
+                &sources,
                 &read_found_blocks(&found_blocks).unwrap(),
                 None,
                 &main,
@@ -1151,12 +1195,22 @@ mod tests {
             (date, AtomicUnit::from_u64(atomic_unit), 3654401)
         };
 
-        // The orphaned block is told apart while the node keeps it.
-        for (orphaned_block, removed) in [(block, 1), (missing, 0)] {
+        // Payout to the address the observer computes for the orphaned block.
+        let outputs = json!([{"miner_address": ADDRESS, "value": 312415032}]);
+        mock_observer_coinbase(&mut server, 200, &outputs.to_string());
+
+        // The orphaned block is told apart while the node keeps it, else by the observer if set.
+        for (orphaned_block, observers, removed) in [
+            (block, Vec::new(), 1),
+            (missing.clone(), Vec::new(), 0),
+            (missing, observer_at(&server.url()), 1),
+        ] {
             let hash = json!({"hash": HASH_ORPHANED});
             let mock = mock_rpc(&mut server, "get_block", hash, &orphaned_block.to_string());
             let dir = tempfile::tempdir().unwrap();
-            let api = GupaxP2poolApi::temporary(dir.path());
+            let mut api = GupaxP2poolApi::temporary(dir.path());
+            api.address = ADDRESS.to_string();
+            api.observers = observers;
             let found_blocks = write_found_blocks(
                 dir.path(),
                 json!([
@@ -1173,6 +1227,72 @@ mod tests {
             checked.unwrap();
             assert_eq!(results, [format!("Orphaned payouts removed: {removed}")]);
             assert_eq!(api.lock().unwrap().payout_u64, 3 - removed);
+            mock.remove();
+        }
+    }
+
+    #[test]
+    fn removes_the_payout_of_an_orphaned_block_with_the_observer() {
+        let mut server = mockito::Server::new();
+        mock_node(&mut server);
+        // Payouts the observer computes for the orphaned block, the second one to a subaddress.
+        let outputs = json!([
+            {
+                "id": HASH_ORPHANED,
+                "index": 0,
+                "global_output_index": 0,
+                "miner": 1,
+                "value": 312415032,
+                "miner_address": ADDRESS,
+            },
+            {
+                "id": HASH_ORPHANED,
+                "index": 1,
+                "global_output_index": 0,
+                "miner": 2,
+                "value": 7,
+                "miner_address": ADDRESS,
+                "miner_payout_address": subaddress().to_string(),
+            },
+        ]);
+        let not_found = json!({"error": "not_found"});
+        let payout = |atomic_unit: u64| {
+            let date = "2026-04-17 11:00:00.1234".to_string();
+            (date, AtomicUnit::from_u64(atomic_unit), 3654401)
+        };
+
+        // The orphaned block is told apart while the observer keeps its shares, and checked again
+        // after a failed request.
+        for (status, body, removed, answered) in [
+            (200, outputs.to_string(), 1, true),
+            (404, not_found.to_string(), 0, true),
+            (403, "Forbidden".to_string(), 0, false),
+        ] {
+            let mock = mock_observer_coinbase(&mut server, status, &body);
+            let dir = tempfile::tempdir().unwrap();
+            let mut api = GupaxP2poolApi::temporary(dir.path());
+            api.address = ADDRESS.to_string();
+            api.observers = observer_at(&server.url());
+            let found_blocks = write_found_blocks(
+                dir.path(),
+                json!([
+                    {"height": 3654401, "hash": HASH_ORPHANED},
+                    {"height": 3654401, "hash": HASH_3654401},
+                ]),
+            );
+            // The payouts of both blocks, and of the subaddress in the orphaned block.
+            let api = Arc::new(Mutex::new(api));
+            GupaxP2poolApi::merge_payouts(&api, &[payout(312415032), payout_3654401(), payout(7)])
+                .unwrap();
+            let listed = vec![payout_3654401()];
+            let (checked, results) = check_orphans(&api, &server, &found_blocks, None, &listed);
+            assert_eq!(checked.is_ok(), answered, "{checked:?}");
+            assert_eq!(results, [format!("Orphaned payouts removed: {removed}")]);
+            assert_eq!(api.lock().unwrap().payout_u64, 3 - removed);
+            assert_eq!(
+                api.lock().unwrap().final_checked.contains(&3654401),
+                answered
+            );
             mock.remove();
         }
     }
@@ -1214,6 +1334,7 @@ mod tests {
             .block_on(remove_orphaned_payouts(
                 &api,
                 &sources.nodes[0].client().unwrap(),
+                &sources,
                 &read_found_blocks(&found_blocks).unwrap(),
                 None,
                 &main,
