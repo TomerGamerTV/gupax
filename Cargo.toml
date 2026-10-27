@@ -146,7 +146,7 @@ egui = {version="0.36.2", features=["callstack"]}
 
 # Windows dependencies
 [target.'cfg(windows)'.dependencies]
-zip = "8.2.0"
+zip = "9.1.2"
 windows = "0.62.2"
 is_elevated = "0.1.2"
 elevated-helper = {git="https://github.com/Cyrix126/elevated-helper"}

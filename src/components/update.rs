@@ -439,7 +439,7 @@ impl Update {
                     let mut archive = zip::ZipArchive::new(Cursor::new(bytes.as_ref()))?;
                     for i in 0..archive.len() {
                         let mut entry = archive.by_index(i)?;
-                        let file = entry.name();
+                        let file: &str = &entry.name()?;
 
                         if let Some(file_name) =
                             Path::new(file).file_name().and_then(|n| n.to_str())
