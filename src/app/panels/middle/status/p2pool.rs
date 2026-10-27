@@ -17,17 +17,23 @@
 
 use std::sync::{Arc, Mutex};
 
-use egui::{Button, Label, RichText, ScrollArea, Separator, Slider, TextStyle};
+use egui::{
+    Button, Label, RichText, ScrollArea, Separator, Slider, TextEdit, TextStyle, ViewportCommand,
+    text::{CCursor, CCursorRange},
+};
+use egui_extras::DatePickerButton;
+use jiff::{Timestamp, civil::Date, tz::TimeZone};
 use readable::num::Unsigned;
 use strum::{EnumCount, IntoEnumIterator};
 
 use crate::{
+    components::gupax::{FileType, FileWindow},
     disk::{
         gupax_p2pool_api::GupaxP2poolApi,
-        state::Status,
+        state::{Gupax, Observer, P2poolChain, Status},
         status::{Hash, PayoutView},
     },
-    helper::p2pool::PubP2poolApi,
+    helper::{p2pool::PubP2poolApi, payout_sync},
     utils::constants::*,
 };
 
@@ -38,8 +44,10 @@ impl Status {
         gupax_p2pool_api: &Arc<Mutex<GupaxP2poolApi>>,
         p2pool_alive: bool,
         p2pool_api: &Arc<Mutex<PubP2poolApi>>,
+        observers: &mut Vec<Observer>,
+        file_window: &Arc<Mutex<FileWindow>>,
     ) {
-        let api = gupax_p2pool_api.lock().unwrap();
+        let mut api = gupax_p2pool_api.lock().unwrap();
         // let height = size.y;
         // let width = size.x;
         // let text = height / 25.0;
@@ -115,6 +123,175 @@ impl Status {
                                 }
                             };
                         });
+                });
+            });
+            // Payouts sync
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.add_sized([0.0, height], Label::new("Observers"));
+                    if ui
+                        .add_enabled(observers.len() < P2poolChain::COUNT, Button::new("+"))
+                        .on_hover_text(STATUS_SUBMENU_ADD_OBSERVER)
+                        .clicked()
+                    {
+                        observers.push(Observer::default());
+                    }
+                });
+                let used: Vec<P2poolChain> =
+                    observers.iter().filter_map(|o| o.chain.clone()).collect();
+                let mut removed = None;
+                for (index, observer) in observers.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        // The chain menu gets the height of the other buttons of the row.
+                        ui.spacing_mut().icon_width = size_text;
+                        let selected = observer
+                            .chain
+                            .as_ref()
+                            .map_or("Chain".to_string(), ToString::to_string);
+                        egui::ComboBox::from_id_salt(("observer", index))
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                for chain in P2poolChain::iter() {
+                                    if observer.chain.as_ref() == Some(&chain)
+                                        || !used.contains(&chain)
+                                    {
+                                        let text = chain.to_string();
+                                        ui.selectable_value(&mut observer.chain, Some(chain), text);
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(STATUS_SUBMENU_OBSERVER_CHAIN);
+                        let hint = observer
+                            .chain
+                            .as_ref()
+                            .map_or("", P2poolChain::public_observer);
+                        ui.add_enabled(
+                            observer.chain.is_some(),
+                            TextEdit::singleline(&mut observer.url)
+                                .hint_text(hint)
+                                .desired_width(ui.available_width() / 3.0),
+                        )
+                        .on_hover_text(STATUS_SUBMENU_OBSERVER);
+                        if ui
+                            .button("-")
+                            .on_hover_text(STATUS_SUBMENU_REMOVE_OBSERVER)
+                            .clicked()
+                        {
+                            removed = Some(index);
+                        }
+                    });
+                }
+                if let Some(index) = removed {
+                    observers.remove(index);
+                }
+                // The payout sync uses a copy of the observers.
+                if api.observers != *observers {
+                    api.observers.clone_from(observers);
+                }
+                ui.horizontal(|ui| {
+                    ui.add_sized([0.0, height], Label::new("Private view key"));
+                    // The key stays shown until Gupax restarts.
+                    let shown_id = ui.id().with("view_key_shown");
+                    let shown = ui.data(|data| data.get_temp(shown_id)).unwrap_or(false);
+                    let key = ui
+                        .add(
+                            TextEdit::singleline(&mut api.view_key)
+                                .password(!shown)
+                                .desired_width(ui.available_width() / 3.0),
+                        )
+                        .on_hover_text(STATUS_SUBMENU_VIEW_KEY);
+                    if ui
+                        .add(Button::new("👁 Show").selected(shown))
+                        .on_hover_text(STATUS_SUBMENU_SHOW_VIEW_KEY)
+                        .clicked()
+                    {
+                        ui.data_mut(|data| data.insert_temp(shown_id, !shown));
+                    }
+                    if ui
+                        .button("🗊 Paste")
+                        .on_hover_text(STATUS_SUBMENU_PASTE_VIEW_KEY)
+                        .clicked()
+                    {
+                        // The clipboard content arrives as a paste event in the next frame
+                        // and replaces the selected key.
+                        let mut state = TextEdit::load_state(ui.ctx(), key.id).unwrap_or_default();
+                        let end = CCursor::new(api.view_key.chars().count());
+                        state
+                            .cursor
+                            .set_char_range(Some(CCursorRange::two(CCursor::new(0), end)));
+                        state.store(ui.ctx(), key.id);
+                        key.request_focus();
+                        ui.ctx().send_viewport_cmd(ViewportCommand::RequestPaste);
+                    }
+                    let window_busy = file_window.lock().unwrap().thread;
+                    if ui
+                        .add_enabled(!window_busy, Button::new("🗁 File"))
+                        .on_hover_text(STATUS_SUBMENU_FILE_VIEW_KEY)
+                        .clicked()
+                    {
+                        Gupax::spawn_file_window_thread(file_window, FileType::ViewKey);
+                    }
+                    let mut file_window = file_window.lock().unwrap();
+                    // An error stays until the next file is picked.
+                    match &file_window.view_key {
+                        Some(Ok(key)) => {
+                            api.view_key.clone_from(key);
+                            file_window.view_key = None;
+                        }
+                        Some(Err(e)) => {
+                            ui.label(e.as_str());
+                        }
+                        None => (),
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add_sized([0.0, height], Label::new("Scan from"));
+                    ui.add(
+                        TextEdit::singleline(&mut api.scan_from)
+                            .hint_text("YYYY-MM-DD")
+                            .desired_width(size_text * 7.0),
+                    )
+                    .on_hover_text(STATUS_SUBMENU_SCAN_FROM);
+                    let today = Timestamp::now().to_zoned(TimeZone::UTC).date();
+                    let mut date = scan_from_date(&api.scan_from, today);
+                    // The button text is the calendar icon alone, the text field shows the date.
+                    let calendar = DatePickerButton::new(&mut date)
+                        .show_icon(false)
+                        .format("📅");
+                    if ui
+                        .add(calendar)
+                        .on_hover_text(STATUS_SUBMENU_PICK_SCAN_FROM)
+                        .changed()
+                    {
+                        api.scan_from = date.to_string();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let enabled = !api.syncing && p2pool_alive;
+                    let disabled_reason = if api.syncing {
+                        STATUS_SUBMENU_REFRESH_SYNCING
+                    } else {
+                        STATUS_SUBMENU_REFRESH_NO_P2POOL
+                    };
+                    if ui
+                        .add_enabled(enabled, Button::new("Refresh"))
+                        .on_hover_text(STATUS_SUBMENU_REFRESH)
+                        .on_disabled_hover_text(disabled_reason)
+                        .clicked()
+                    {
+                        payout_sync::start(&mut api, gupax_p2pool_api);
+                    }
+                    if api.syncing {
+                        ui.spinner();
+                        if ui
+                            .add_enabled(!api.stop_sync, Button::new("Stop"))
+                            .clicked()
+                        {
+                            api.stop_sync = true;
+                        }
+                    }
+                    ui.add(Label::new(api.sync.as_str()).wrap());
                 });
             });
             // });
@@ -311,5 +488,26 @@ impl Status {
                 drop(api);
             });
         });
+    }
+}
+
+// Date of the scan date [text] that the date picker opens on, [today] if [text] holds none.
+fn scan_from_date(text: &str, today: Date) -> Date {
+    text.trim().parse().unwrap_or(today)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn date_picker_opens_on_the_scan_date() {
+        let today = Date::constant(2026, 10, 22);
+        let date = Date::constant(2026, 4, 17);
+        assert_eq!(scan_from_date(" 2026-04-17 ", today), date);
+        assert_eq!(scan_from_date("", today), today);
+        assert_eq!(scan_from_date("17/04/2026", today), today);
+        // The picker writes the date as the scan reads it.
+        assert_eq!(date.to_string(), "2026-04-17");
     }
 }

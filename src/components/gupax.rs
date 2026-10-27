@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use crate::{disk::state::*, utils::macros::arc_mut};
+use crate::{disk::state::*, helper::payout_sync, utils::macros::arc_mut};
 use log::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -39,6 +39,7 @@ pub struct FileWindow {
     pub nodedb_path: String,      // The picked node path
     pub xmrig_path: String,       // The picked xmrig path
     pub xmrig_proxy_path: String, // The picked xmrig-proxy path
+    pub view_key: Option<Result<String, String>>, // The private view key of the picked file, or the error
 }
 
 impl FileWindow {
@@ -55,6 +56,7 @@ impl FileWindow {
             nodedb_path: String::new(),
             xmrig_path: String::new(),
             xmrig_proxy_path: String::new(),
+            view_key: None,
         })
     }
 }
@@ -66,6 +68,7 @@ pub enum FileType {
     XmrigProxy,
     Node,
     NodeDB,
+    ViewKey,
 }
 
 //---------------------------------------------------------------------------------------------------- Ratio Lock
@@ -106,6 +109,7 @@ impl Gupax {
             XmrigProxy => "XMRigProxy",
             Node => "Node",
             NodeDB => "Node DB",
+            ViewKey => "private view key",
         };
         let file_window = file_window.clone();
         file_window.lock().unwrap().thread = true;
@@ -114,6 +118,16 @@ impl Gupax {
                 NodeDB => rfd::FileDialog::new()
                     .set_title("Select a directory for the DB of your Node")
                     .pick_folder(),
+                ViewKey => {
+                    let dialog = rfd::FileDialog::new()
+                        .set_title("Select the file of your private view key");
+                    // macOS dialogs have no filter menu: a filter would hide the other files.
+                    #[cfg(not(target_os = "macos"))]
+                    let dialog = dialog
+                        .add_filter("Private view key (.txt)", &["txt"])
+                        .add_filter("All files", &["*"]);
+                    dialog.pick_file()
+                }
                 _ => rfd::FileDialog::new()
                     .set_title(format!("Select {name} Binary for Gupax"))
                     .pick_file(),
@@ -140,6 +154,10 @@ impl Gupax {
                     NodeDB => {
                         file_window.lock().unwrap().nodedb_path = path.display().to_string();
                         file_window.lock().unwrap().picked_nodedb = true;
+                    }
+                    ViewKey => {
+                        let key = payout_sync::read_view_key(&path);
+                        file_window.lock().unwrap().view_key = Some(key);
                     }
                 };
             } else {

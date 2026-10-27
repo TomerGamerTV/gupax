@@ -280,6 +280,11 @@ impl crate::app::App {
                                     Ok(s) => {
                                         self.state = s;
                                         self.og = arc_mut!(self.state.clone());
+                                        self.gupax_p2pool_api
+                                            .lock()
+                                            .unwrap()
+                                            .observers
+                                            .clone_from(&self.state.p2pool.observers);
                                         self.error_state.set(
                                             "State read OK",
                                             ErrorFerris::Happy,

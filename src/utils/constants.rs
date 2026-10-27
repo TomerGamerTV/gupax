@@ -80,6 +80,8 @@ pub const P2POOL_API_PATH_LOCAL: &str = r"local\stratum";
 pub const P2POOL_API_PATH_NETWORK: &str = r"network\stats";
 #[cfg(target_os = "windows")]
 pub const P2POOL_API_PATH_POOL: &str = r"pool\stats";
+#[cfg(target_os = "windows")]
+pub const P2POOL_API_PATH_BLOCKS: &str = r"pool\blocks";
 #[cfg(target_family = "windows")]
 pub const P2POOL_API_PATH_P2P: &str = r"local\p2p";
 #[cfg(target_family = "unix")]
@@ -89,7 +91,11 @@ pub const P2POOL_API_PATH_NETWORK: &str = "network/stats";
 #[cfg(target_family = "unix")]
 pub const P2POOL_API_PATH_POOL: &str = "pool/stats";
 #[cfg(target_family = "unix")]
+pub const P2POOL_API_PATH_BLOCKS: &str = "pool/blocks";
+#[cfg(target_family = "unix")]
 pub const P2POOL_API_PATH_P2P: &str = "local/p2p";
+// Depth from which the block of a payout is final: mined coins are locked for as many blocks.
+pub const P2POOL_PAYOUT_CHECK_DEPTH: u64 = 60;
 pub const XMRIG_API_SUMMARY_ENDPOINT: &str = "1/summary"; // The default relative URI of XMRig's API summary
 pub const XMRIG_API_CONFIG_ENDPOINT: &str = "1/config"; // The default relative URI of XMRig's API config
 
@@ -271,6 +277,20 @@ pub const STATUS_SUBMENU_LATEST: &str = "Sort the payouts from latest to oldest"
 pub const STATUS_SUBMENU_OLDEST: &str = "Sort the payouts from oldest to latest";
 pub const STATUS_SUBMENU_BIGGEST: &str = "Sort the payouts from biggest to smallest";
 pub const STATUS_SUBMENU_SMALLEST: &str = "Sort the payouts from smallest to biggest";
+pub const STATUS_SUBMENU_OBSERVER: &str = "The P2Pool observer for the chain you are mining on. If empty, the default one will be used (*.p2pool.observer). The observer will see your IP and specific requests. Host your own P2Pool observer to keep this information private.";
+pub const STATUS_SUBMENU_OBSERVER_CHAIN: &str = "Chain of the observer";
+pub const STATUS_SUBMENU_ADD_OBSERVER: &str = "Add an observer for another chain";
+pub const STATUS_SUBMENU_REMOVE_OBSERVER: &str = "Remove this observer";
+pub const STATUS_SUBMENU_VIEW_KEY: &str =
+    "Private view key of your P2Pool address, used to find the missing payouts.";
+pub const STATUS_SUBMENU_SHOW_VIEW_KEY: &str = "Show the private view key";
+pub const STATUS_SUBMENU_PASTE_VIEW_KEY: &str = "Paste the private view key";
+pub const STATUS_SUBMENU_FILE_VIEW_KEY: &str = "Read the private view key from a file";
+pub const STATUS_SUBMENU_SCAN_FROM: &str = "Date from which the next scan with the private view key finds the payouts. Without date, a scan continues the last one, or covers the last 30 days. An older date takes longer.";
+pub const STATUS_SUBMENU_PICK_SCAN_FROM: &str = "Pick the date in a calendar";
+pub const STATUS_SUBMENU_REFRESH: &str = "Add the missing payouts, found with the private view key if filled or else listed by the observer of the chain P2Pool mines on, and remove the payouts of orphaned blocks.";
+pub const STATUS_SUBMENU_REFRESH_SYNCING: &str = "A sync is already running.";
+pub const STATUS_SUBMENU_REFRESH_NO_P2POOL: &str = "P2Pool must be running and synced.";
 pub const STATUS_SUBMENU_AUTOMATIC: &str =
     "Automatically calculate share/block time with your current P2Pool 1 hour average hashrate";
 pub const STATUS_SUBMENU_MANUAL: &str = "Manually input a hashrate to calculate share/block time with current P2Pool/Monero network stats";

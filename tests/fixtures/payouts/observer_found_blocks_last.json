@@ -1,0 +1,4 @@
+[
+{"main_block":{"id":"2eeaad9772c5d8b9c2303693dd57c50d52c3bfda9935bd4b49ef9934c177dd8a","height":3782741,"timestamp":1791844801,"reward":613933980000,"coinbase_id":"7b6094d065723f15a82b16f8ee9e28b278ff13de8a227595babc00f3d92fd12f","difficulty":755850110879,"side_template_id":"c81f90a66882fef7e21b3c628505a4e3fe667233143e1c8307418a3dfd5e7b27","root_hash":"2d2d99819ada68650a36022311b3f58ad412bcfa2db327562a18beb464775862","coinbase_private_key":"d5a0abc3848814c236978a045397513b3e2086fbe4156e9a22996e3bd2136602"},"side_height":1481437,"miner":4027,"effective_height":1481437,"window_depth":2160,"window_outputs":452,"transaction_count":17,"difficulty":135554240,"cumulative_difficulty":148275169776399,"inclusion":1,"miner_address":"458ZtAwX7Je3Ev69aEg6LhBPBmP6usdpJ2fmaEoPtfxf1xXinQN67PkeQkH1EZiU33HiiuLYstaAaDQQC3PHvAiFChvVD6K"}
+
+]

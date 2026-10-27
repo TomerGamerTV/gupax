@@ -32,7 +32,7 @@ dirs = "6.0.0"
 #--------------------------------------------------------------------------------
 egui = "0.36.2"
 
-egui_extras = {version="0.36.2", features = ["image"] }
+egui_extras = {version="0.36.2", features = ["image", "datepicker"] }
 egui_commonmark = {version="0.25.0", features=["better_syntax_highlighting"]}
 
 ## 2023-12-28: https://github.com/hinto-janai/gupax/issues/68
@@ -48,7 +48,7 @@ egui_commonmark = {version="0.25.0", features=["better_syntax_highlighting"]}
 #--------------------------------------------------------------------------------
 env_logger = "0.11.9"
 figment = { version = "0.10.19", features = ["toml"] }
-reqwest = {version = "0.13.2", default-features=false, features=["json", "default-tls"]}
+reqwest = {version = "0.13.2", default-features=false, features=["json", "default-tls", "socks"]}
 reqwest-middleware = "0.5"
 reqwest-retry = "0.9"
 image = { version = "0.25.10", features = ["png"] }
@@ -73,6 +73,7 @@ derive_more = {version="2.1.1", default-features=false, features=["display", "de
 serde-this-or-that = "0.5.0"
 readable = "0.16"
 chrono = {version="0.4", default-features=false, features=["clock", "std", "serde"]}
+jiff = {version="0.2.38", default-features=false, features=["std"]}
 enclose = "1.2.1"
 bounded-vec-deque = {version="0.1.1", default-features=false}
 cfg-if = "1.0"
@@ -99,6 +100,10 @@ ctrlc = {version="3.5", features=["termination"]}
 
 tokio-stream = {version = "0.1", default-features=false}
 thiserror = "2.0"
+monero = "0.22.0"
+hex = "0.4.3"
+## digest authentication of the Monero node RPC
+http-auth = {version = "0.1.10", default-features = false, features = ["digest-scheme", "http10"]}
 
 # System tray
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
@@ -141,6 +146,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 ] }
 [dev-dependencies]
 egui = {version="0.36.2", features=["callstack"]}
+mockito = "1.7.2"
+tempfile = "3.27.0"
 # egui = {git="https://github.com/emilk/egui", features=["callstack"]}
 
 

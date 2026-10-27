@@ -88,7 +88,6 @@ pub struct P2poolRegex {
     pub payout_float: Regex,
     pub block: Regex,
     pub block_int: Regex,
-    pub block_comma: Regex,
 }
 
 impl P2poolRegex {
@@ -99,9 +98,8 @@ impl P2poolRegex {
             date: Regex::new("[0-9]+-[0-9]+-[0-9]+ [0-9]+:[0-9]+:[0-9]+.[0-9]+").unwrap(),
             payout: Regex::new("payout of [0-9].[0-9]+ XMR").unwrap(), // Assumes 12 digits after the dot.
             payout_float: Regex::new("[0-9].[0-9]{12}").unwrap(), // Assumes 12 digits after the dot.
-            block: Regex::new("block [0-9]{7}").unwrap(), // Monero blocks will be 7 digits for... the next 10,379 years
-            block_int: Regex::new("[0-9]{7}").unwrap(),
-            block_comma: Regex::new("[0-9],[0-9]{3},[0-9]{3}").unwrap(),
+            block: Regex::new("block [0-9]+").unwrap(),
+            block_int: Regex::new("[0-9]+").unwrap(),
         }
     }
 }
@@ -174,6 +172,21 @@ pub fn p2pool_monero_node(s: &str) -> Option<Node> {
         });
     }
     None
+}
+pub fn p2pool_block_height(s: &str) -> Option<u64> {
+    let block = P2POOL_REGEX.block.find(s)?;
+    P2POOL_REGEX
+        .block_int
+        .find(block.as_str())?
+        .as_str()
+        .parse()
+        .ok()
+}
+// Whether the line [s] of P2Pool tells a block found by the pool paid the user nothing
+pub fn contains_no_payout(s: &str) -> bool {
+    static NO_PAYOUT: Lazy<Regex> =
+        Lazy::new(|| Regex::new("didn't get a payout in block").unwrap());
+    NO_PAYOUT.is_match(s)
 }
 pub fn detect_pool_xmrig(s: &str, proxy_port: u16, p2pool_port: u16) -> Option<Pool> {
     static CURRENT_SHARE: Lazy<Regex> =
@@ -343,7 +356,6 @@ mod test {
     fn build_p2pool_regex() {
         let r = P2poolRegex::new();
         let text = "NOTICE  2022-11-11 11:11:11.1111 P2Pool You received a payout of 0.111111111111 XMR in block 1111111";
-        let text2 = "2022-11-11 11:11:11.1111 | 0.111111111111 XMR | Block 1,111,111";
         assert_eq!(
             r.payout.find(text).unwrap().as_str(),
             "payout of 0.111111111111 XMR"
@@ -356,9 +368,22 @@ mod test {
             r.date.find(text).unwrap().as_str(),
             "2022-11-11 11:11:11.1111"
         );
-        assert_eq!(r.block.find(text).unwrap().as_str(), "block 1111111");
-        assert_eq!(r.block_int.find(text).unwrap().as_str(), "1111111");
-        assert_eq!(r.block_comma.find(text2).unwrap().as_str(), "1,111,111");
+        let block = r.block.find(text).unwrap().as_str();
+        assert_eq!(block, "block 1111111");
+        assert_eq!(r.block_int.find(block).unwrap().as_str(), "1111111");
+        let text = "NOTICE  2050-11-11 11:11:11.1111 P2Pool You received a payout of 0.111111111111 XMR in block 10000001";
+        let block = r.block.find(text).unwrap().as_str();
+        assert_eq!(block, "block 10000001");
+        assert_eq!(r.block_int.find(block).unwrap().as_str(), "10000001");
+    }
+
+    #[test]
+    fn block_without_payout() {
+        let text = "NOTICE  2026-10-04 10:00:00.0000 P2Pool Your wallet 4AAA didn't get a payout in block 3654401 because you had no shares in PPLNS window";
+        assert!(contains_no_payout(text));
+        assert_eq!(p2pool_block_height(text), Some(3654401));
+        let text = "NOTICE  2026-10-04 10:00:00.0000 P2Pool Your wallet 4AAA got a payout of 0.000274561854 XMR in block 3654401";
+        assert!(!contains_no_payout(text));
     }
 
     #[test]

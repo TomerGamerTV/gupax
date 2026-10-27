@@ -6,3 +6,5 @@ extend-exclude = [
 ]
 [default]
 extend-ignore-identifiers-re = ["ehr", "PN", "onnection", "onnections"]
+# Monero addresses
+extend-ignore-re = ["[48][1-9A-HJ-NP-Za-km-z]{94}"]

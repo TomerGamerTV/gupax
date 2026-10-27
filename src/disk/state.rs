@@ -525,6 +525,8 @@ pub struct P2pool {
     pub prefer_local_node: bool,
     pub console_height: u32,
     pub crawl_settings: CrawlerRequirements,
+    #[serde(default)]
+    pub observers: Vec<Observer>,
 }
 
 // compatible for P2Pool and Xmrig/Proxy
@@ -796,16 +798,36 @@ impl Default for P2pool {
             prefer_local_node: true,
             console_height: APP_DEFAULT_CONSOLE_HEIGHT,
             crawl_settings: CrawlerRequirements::default(),
+            observers: Vec::new(),
         }
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Debug, Deserialize, Serialize, Display, Default)]
+#[derive(
+    Clone, Eq, PartialEq, Debug, Deserialize, Serialize, Display, Default, EnumIter, EnumCount,
+)]
 pub enum P2poolChain {
     #[default]
     Nano,
     Mini,
     Main,
+}
+
+impl P2poolChain {
+    pub fn public_observer(&self) -> &'static str {
+        match self {
+            P2poolChain::Nano => "https://nano.p2pool.observer",
+            P2poolChain::Mini => "https://mini.p2pool.observer",
+            P2poolChain::Main => "https://p2pool.observer",
+        }
+    }
+}
+
+// P2Pool observer of a chain, which lists the payouts of an address.
+#[derive(Clone, Eq, PartialEq, Debug, Default, Deserialize, Serialize)]
+pub struct Observer {
+    pub chain: Option<P2poolChain>,
+    pub url: String,
 }
 
 impl TryFrom<String> for P2poolChain {

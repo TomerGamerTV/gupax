@@ -554,4 +554,53 @@ Uptime         = 0h 2m 4s
             args
         );
     }
+
+    #[test]
+    fn nodes_of_p2pool() {
+        use crate::disk::node::Node;
+        use crate::helper::p2pool::{P2poolHost, P2poolNodes};
+        let nodes = |arguments: &str| {
+            P2poolNodes::from_args(&arguments.split(' ').map(String::from).collect::<Vec<_>>())
+        };
+        let host = |ip: &str, rpc: &str, zmq: &str| P2poolHost {
+            node: Node {
+                ip: ip.to_string(),
+                rpc: rpc.to_string(),
+                zmq: zmq.to_string(),
+            },
+            ..Default::default()
+        };
+        let backup = "--host 127.0.0.1 --rpc-port 18089 --zmq-port 18084 --host node2.monerodevs.org --rpc-port 18081 --zmq-port 18083";
+        assert_eq!(
+            nodes(backup).hosts,
+            [
+                host("127.0.0.1", "18089", "18084"),
+                host("node2.monerodevs.org", "18081", "18083")
+            ]
+        );
+        // P2Pool connects to its default node without --host.
+        assert_eq!(
+            nodes("--mini --rpc-port 18089").hosts,
+            [host("127.0.0.1", "18089", "18083")]
+        );
+        assert_eq!(
+            nodes("--rpc-port 18089 --zmq-port 18084 --host 192.168.1.5").hosts,
+            [
+                host("127.0.0.1", "18089", "18084"),
+                host("192.168.1.5", "18089", "18084")
+            ]
+        );
+        let tor = nodes("--socks5 127.0.0.1:9050 --host xyz.onion --rpc-login user:pass --rpc-ssl");
+        assert_eq!(
+            tor,
+            P2poolNodes {
+                hosts: vec![P2poolHost {
+                    rpc_login: "user:pass".to_string(),
+                    rpc_ssl: true,
+                    ..host("xyz.onion", "18081", "18083")
+                }],
+                socks5: "127.0.0.1:9050".to_string(),
+            }
+        );
+    }
 }
